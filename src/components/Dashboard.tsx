@@ -809,17 +809,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </button>
                   </div>
                 )}
-
-                {/* Bouton rapide d'ajout */}
-                <div className="pt-2">
-                  <button
-                    onClick={() => setIsAddModalOpen(true)}
-                    className="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.99]"
-                  >
-                    <Plus className="w-4 h-4 stroke-[2.5]" />
-                    <span>Ajouter une dépense</span>
-                  </button>
-                </div>
               </div>
             </motion.div>
           )}
