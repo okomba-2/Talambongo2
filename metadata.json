@@ -1,0 +1,7 @@
+{
+  "name": "TalaMbongo",
+  "description": "Application web PWA moderne de gestion personnelle des dépenses. Vois où va ton argent simplement.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

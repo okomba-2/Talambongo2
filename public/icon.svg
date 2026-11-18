@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="128" fill="#059669"/>
+  <!-- Subtle circular gradient highlight -->
+  <circle cx="256" cy="256" r="180" stroke="#34D399" stroke-width="12" stroke-opacity="0.3" fill="none"/>
+  <!-- Central Stylized "Tala" Eye & "Mbongo" Coin symbol -->
+  <ellipse cx="256" cy="256" rx="130" ry="85" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="48" fill="#FFFFFF"/>
+  <circle cx="270" cy="242" r="16" fill="#059669"/>
+  <!-- Sparkle indicator indicating clarity and tracking -->
+  <path d="M370 160L378 185L403 193L378 201L370 226L362 201L337 193L362 185Z" fill="#A7F3D0"/>
+</svg>

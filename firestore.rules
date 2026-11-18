@@ -1,0 +1,383 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pillar 1: Default-deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================
+    // HARDENED GLOBAL PRIMITIVES
+    // =========================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Admin verification: requires verified auth token + trusted /admins/{uid} record,
+    // verified bootstrapped admin email, or verified Firebase Custom Claim.
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'okombacontact@gmail.com' ||
+        request.auth.token.role == 'ADMIN' ||
+        request.auth.token.admin == true
+      );
+    }
+
+    function isValidCurrency(currency) {
+      return currency in ['XOF', 'XAF', 'CDF', 'EUR'];
+    }
+
+    function isValidRole(role) {
+      return role in ['USER', 'ADMIN'];
+    }
+
+    function isValidSubStatus(status) {
+      return status in ['trial', 'active', 'expired', 'renewed', 'cancelled'];
+    }
+
+    function isValidSubType(planType) {
+      return planType in ['free_trial', 'monthly', 'quarterly'];
+    }
+
+    function isValidPaymentStatus(paymentStatus) {
+      return paymentStatus in ['confirmed', 'pending', 'failed', 'none'];
+    }
+
+    // =========================================================
+    // VALIDATION BLUEPRINTS (Anti-Update-Gap & Shadow Guard)
+    // =========================================================
+    function isValidUserPayload(data, expectedUid) {
+      return data.keys().hasAll([
+        'uid',
+        'name',
+        'email',
+        'country',
+        'currency',
+        'role',
+        'subscriptionStatus',
+        'subscriptionType',
+        'onboardingCompleted',
+        'expensesCount',
+        'reportsViewedCount',
+        'pdfExportsCount',
+        'createdAt',
+        'lastActiveAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid',
+        'name',
+        'email',
+        'country',
+        'currency',
+        'role',
+        'subscriptionStatus',
+        'subscriptionType',
+        'subscriptionStartAt',
+        'subscriptionEndAt',
+        'trialDaysLeft',
+        'mainGoal',
+        'trackingFrequency',
+        'onboardingCompleted',
+        'expensesCount',
+        'reportsViewedCount',
+        'pdfExportsCount',
+        'createdAt',
+        'lastActiveAt',
+        'updatedAt'
+      ])
+      && data.uid is string && data.uid == expectedUid && isValidId(data.uid)
+      && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+      && data.country is string && data.country.size() >= 1 && data.country.size() <= 80
+      && isValidCurrency(data.currency)
+      && isValidRole(data.role)
+      && isValidSubStatus(data.subscriptionStatus)
+      && isValidSubType(data.subscriptionType)
+      && (!('subscriptionStartAt' in data) || (data.subscriptionStartAt is string && data.subscriptionStartAt.size() <= 40))
+      && (!('subscriptionEndAt' in data) || (data.subscriptionEndAt is string && data.subscriptionEndAt.size() <= 40))
+      && (!('trialDaysLeft' in data) || (data.trialDaysLeft is number && data.trialDaysLeft >= 0 && data.trialDaysLeft <= 365))
+      && (!('mainGoal' in data) || (data.mainGoal is string && data.mainGoal.size() <= 150))
+      && (!('trackingFrequency' in data) || (data.trackingFrequency is string && data.trackingFrequency.size() <= 80))
+      && data.onboardingCompleted is bool
+      && data.expensesCount is number && data.expensesCount >= 0
+      && data.reportsViewedCount is number && data.reportsViewedCount >= 0
+      && data.pdfExportsCount is number && data.pdfExportsCount >= 0
+      && data.createdAt is timestamp
+      && data.lastActiveAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidExpensePayload(data, expectedUid) {
+      return data.keys().hasAll([
+        'id',
+        'userId',
+        'title',
+        'amount',
+        'currency',
+        'category',
+        'moment',
+        'date',
+        'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'userId',
+        'title',
+        'amount',
+        'currency',
+        'category',
+        'moment',
+        'date',
+        'note',
+        'createdAt'
+      ])
+      && data.id is string && data.id.size() >= 1 && data.id.size() <= 128
+      && data.userId is string && data.userId == expectedUid && isValidId(data.userId)
+      && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+      && data.amount is number && data.amount >= 0
+      && isValidCurrency(data.currency)
+      && data.category is string && data.category.size() >= 1 && data.category.size() <= 50
+      && data.moment in ['Matin', 'Après-midi', 'Soir']
+      && data.date is string && data.date.size() == 10 && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && (!('note' in data) || (data.note is string && data.note.size() <= 300))
+      && data.createdAt is timestamp;
+    }
+
+    function isValidSubscriptionPayload(data) {
+      return data.keys().hasAll([
+        'userId',
+        'country',
+        'planType',
+        'status',
+        'paymentStatus',
+        'amount',
+        'currency',
+        'amountXof',
+        'startDate',
+        'endDate',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'userId',
+        'country',
+        'planType',
+        'status',
+        'paymentStatus',
+        'amount',
+        'currency',
+        'amountXof',
+        'startDate',
+        'endDate',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.userId is string && isValidId(data.userId)
+      && data.country is string && data.country.size() >= 1 && data.country.size() <= 80
+      && isValidSubType(data.planType)
+      && isValidSubStatus(data.status)
+      && isValidPaymentStatus(data.paymentStatus)
+      && data.amount is number && data.amount >= 0
+      && isValidCurrency(data.currency)
+      && data.amountXof is number && data.amountXof >= 0
+      && data.startDate is string && data.startDate.size() >= 1 && data.startDate.size() <= 40
+      && data.endDate is string && data.endDate.size() >= 1 && data.endDate.size() <= 40
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminEntryPayload(data, expectedUid) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'grantedBy', 'createdAt'])
+      && data.keys().hasOnly(['uid', 'email', 'displayName', 'grantedBy', 'createdAt'])
+      && data.uid is string && data.uid == expectedUid && isValidId(data.uid)
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+      && data.grantedBy is string && data.grantedBy.size() >= 1 && data.grantedBy.size() <= 128
+      && data.createdAt is timestamp;
+    }
+
+    function isValidAdminStatsPayload(data) {
+      return data.keys().hasOnly([
+        'totalUsers',
+        'activeUsers30d',
+        'paidUsers',
+        'freeUsers',
+        'totalRevenueXof',
+        'countriesCount',
+        'totalExpensesLogged',
+        'totalReportsViewed',
+        'totalPdfExports',
+        'usersWithExpenses',
+        'activeActivityThresholdDays',
+        'defaultAdminCurrency',
+        'updatedAt'
+      ])
+      && data.keys().hasAll(['updatedAt'])
+      && data.updatedAt is timestamp
+      && (!('totalUsers' in data) || (data.totalUsers is number && data.totalUsers >= 0))
+      && (!('activeUsers30d' in data) || (data.activeUsers30d is number && data.activeUsers30d >= 0))
+      && (!('paidUsers' in data) || (data.paidUsers is number && data.paidUsers >= 0))
+      && (!('freeUsers' in data) || (data.freeUsers is number && data.freeUsers >= 0))
+      && (!('totalRevenueXof' in data) || (data.totalRevenueXof is number && data.totalRevenueXof >= 0))
+      && (!('countriesCount' in data) || (data.countriesCount is number && data.countriesCount >= 0))
+      && (!('totalExpensesLogged' in data) || (data.totalExpensesLogged is number && data.totalExpensesLogged >= 0))
+      && (!('totalReportsViewed' in data) || (data.totalReportsViewed is number && data.totalReportsViewed >= 0))
+      && (!('totalPdfExports' in data) || (data.totalPdfExports is number && data.totalPdfExports >= 0))
+      && (!('usersWithExpenses' in data) || (data.usersWithExpenses is number && data.usersWithExpenses >= 0))
+      && (!('activeActivityThresholdDays' in data) || (data.activeActivityThresholdDays is number && data.activeActivityThresholdDays >= 1 && data.activeActivityThresholdDays <= 365))
+      && (!('defaultAdminCurrency' in data) || isValidCurrency(data.defaultAdminCurrency));
+    }
+
+    // =========================================================
+    // COLLECTION RULES
+    // =========================================================
+
+    // 1. User accounts (owner read/write without role escalation, admin read/manage)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && isValidUserPayload(incoming(), userId)
+        && (
+          (isOwner(userId) && incoming().role == 'USER') ||
+          (isOwner(userId) && incoming().role == 'ADMIN' && isAdmin()) ||
+          isAdmin()
+        )
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidUserPayload(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'country',
+              'currency',
+              'mainGoal',
+              'trackingFrequency',
+              'onboardingCompleted',
+              'subscriptionStatus',
+              'subscriptionType',
+              'subscriptionStartAt',
+              'subscriptionEndAt',
+              'trialDaysLeft',
+              'expensesCount',
+              'reportsViewedCount',
+              'pdfExportsCount',
+              'lastActiveAt',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(userId) && isAdmin();
+
+      // 2. Personal Expenses Subcollection (STRICTLY owner-only; hidden even from Admin)
+      match /expenses/{expenseId} {
+        allow get: if isValidId(userId) && isValidId(expenseId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId);
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(expenseId)
+          && isOwner(userId)
+          && isValidExpensePayload(incoming(), userId)
+          && incoming().createdAt == request.time;
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(expenseId)
+          && isOwner(userId)
+          && isValidExpensePayload(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt;
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(expenseId)
+          && isOwner(userId);
+      }
+    }
+
+    // 3. Subscriptions & Payments
+    match /subscriptions/{subscriptionId} {
+      allow get: if isValidId(subscriptionId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && isValidId(subscriptionId)
+        && isValidSubscriptionPayload(incoming())
+        && (incoming().userId == request.auth.uid || isAdmin())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(subscriptionId)
+        && isValidSubscriptionPayload(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().userId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'paymentStatus',
+              'endDate',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(subscriptionId) && isAdmin();
+    }
+
+    // 4. Admin Allowlist Registry
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && (isOwner(adminUid) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(adminUid) && isAdmin() && isValidAdminEntryPayload(incoming(), adminUid) && incoming().createdAt == request.time;
+      allow update: if isValidId(adminUid) && isAdmin() && isValidAdminEntryPayload(incoming(), adminUid) && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(adminUid) && isAdmin();
+    }
+
+    // 5. Aggregated Admin Statistics & Config
+    match /admin_stats/{statId} {
+      allow get: if isValidId(statId) && isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if isValidId(statId) && isAdmin() && isValidAdminStatsPayload(incoming()) && incoming().updatedAt == request.time;
+      allow delete: if isValidId(statId) && isAdmin();
+    }
+  }
+}

@@ -1,0 +1,155 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Compte utilisateur TalaMbongo avec profil, rôle, pays, devise, statut d'abonnement et compteurs d'activité agrégés (aucun détail de dépense personnelle exposé).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "country": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "currency": { "type": "string", "enum": ["XOF", "XAF", "CDF", "EUR"] },
+        "role": { "type": "string", "enum": ["USER", "ADMIN"] },
+        "subscriptionStatus": { "type": "string", "enum": ["trial", "active", "expired", "renewed", "cancelled"] },
+        "subscriptionType": { "type": "string", "enum": ["free_trial", "monthly", "quarterly"] },
+        "subscriptionStartAt": { "type": "string", "maxLength": 40 },
+        "subscriptionEndAt": { "type": "string", "maxLength": 40 },
+        "trialDaysLeft": { "type": "number" },
+        "mainGoal": { "type": "string", "maxLength": 150 },
+        "trackingFrequency": { "type": "string", "maxLength": 80 },
+        "onboardingCompleted": { "type": "boolean" },
+        "expensesCount": { "type": "number" },
+        "reportsViewedCount": { "type": "number" },
+        "pdfExportsCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastActiveAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "name",
+        "email",
+        "country",
+        "currency",
+        "role",
+        "subscriptionStatus",
+        "subscriptionType",
+        "onboardingCompleted",
+        "expensesCount",
+        "reportsViewedCount",
+        "pdfExportsCount",
+        "createdAt",
+        "lastActiveAt",
+        "updatedAt"
+      ]
+    },
+    "UserExpense": {
+      "title": "UserExpense",
+      "description": "Dépense personnelle privée appartenant exclusivement à son propriétaire.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["XOF", "XAF", "CDF", "EUR"] },
+        "category": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "moment": { "type": "string", "enum": ["Matin", "Après-midi", "Soir"] },
+        "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10 },
+        "note": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "title", "amount", "currency", "category", "moment", "date", "createdAt"]
+    },
+    "SubscriptionRecord": {
+      "title": "SubscriptionRecord",
+      "description": "Historique des abonnements et paiements confirmés, en attente ou échoués.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "country": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "planType": { "type": "string", "enum": ["free_trial", "monthly", "quarterly"] },
+        "status": { "type": "string", "enum": ["trial", "active", "expired", "renewed", "cancelled"] },
+        "paymentStatus": { "type": "string", "enum": ["confirmed", "pending", "failed", "none"] },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["XOF", "XAF", "CDF", "EUR"] },
+        "amountXof": { "type": "number" },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "endDate": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "country",
+        "planType",
+        "status",
+        "paymentStatus",
+        "amount",
+        "currency",
+        "amountXof",
+        "startDate",
+        "endDate",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRegistryEntry": {
+      "title": "AdminRegistryEntry",
+      "description": "Registre sécurisé des comptes autorisés à accéder au dashboard administrateur.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "grantedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "grantedBy", "createdAt"]
+    },
+    "AdminStatsSnapshot": {
+      "title": "AdminStatsSnapshot",
+      "description": "Agrégations globales anonymisées et paramètres du dashboard administrateur.",
+      "type": "object",
+      "properties": {
+        "totalUsers": { "type": "number" },
+        "activeUsers30d": { "type": "number" },
+        "paidUsers": { "type": "number" },
+        "freeUsers": { "type": "number" },
+        "totalRevenueXof": { "type": "number" },
+        "countriesCount": { "type": "number" },
+        "totalExpensesLogged": { "type": "number" },
+        "totalReportsViewed": { "type": "number" },
+        "totalPdfExports": { "type": "number" },
+        "usersWithExpenses": { "type": "number" },
+        "activeActivityThresholdDays": { "type": "number" },
+        "defaultAdminCurrency": { "type": "string", "enum": ["XOF", "XAF", "CDF", "EUR"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Profils et métadonnées des comptes utilisateurs (lecture/écriture propriétaire ou lecture/gestion admin)."
+    },
+    "/users/{userId}/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/UserExpense" },
+      "description": "Dépenses personnelles strictement privées accessibles uniquement à l'utilisateur propriétaire."
+    },
+    "/subscriptions/{subscriptionId}": {
+      "schema": { "$ref": "#/entities/SubscriptionRecord" },
+      "description": "Enregistrements d'abonnements et paiements pour le suivi des revenus."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminRegistryEntry" },
+      "description": "Liste de contrôle d'accès administrateur."
+    },
+    "/admin_stats/{statId}": {
+      "schema": { "$ref": "#/entities/AdminStatsSnapshot" },
+      "description": "Cache d'agrégation des statistiques globales administrateur et configuration."
+    }
+  }
+}
