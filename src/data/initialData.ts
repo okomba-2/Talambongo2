@@ -13,8 +13,8 @@ export const CATEGORIES: { name: ExpenseCategory; icon: string; color: string; b
 ];
 
 export const INITIAL_USER: UserProfile = {
-  name: 'David Okomba',
-  email: 'okombacontact@gmail.com',
+  name: 'Utilisateur TalaMbongo',
+  email: 'utilisateur@talambongo.app',
   status: 'Essai gratuit',
   trialDaysLeft: 7,
   country: 'Congo-Brazzaville',

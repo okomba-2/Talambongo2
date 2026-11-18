@@ -1777,7 +1777,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2">
                         <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                          <span>Option 1 mois (1 000 FCFA)</span>
+                          <span>Option 1 mois (500 FCFA)</span>
                           <span className="tabular-nums text-[#087A50]">
                             {formatCurrency(
                               convertAmount(
@@ -1809,7 +1809,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/70 space-y-2">
                         <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                          <span>Option 3 mois (2 700 FCFA)</span>
+                          <span>Option 3 mois (1 200 FCFA)</span>
                           <span className="tabular-nums text-[#063D2E]">
                             {formatCurrency(
                               convertAmount(
@@ -1858,7 +1858,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="bg-white rounded-2xl border border-slate-200/80 p-5 space-y-1">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-slate-500">
@@ -1870,19 +1870,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         {globalActivity.totalExpensesLogged.toLocaleString('fr-FR')}
                       </p>
                       <span className="text-[11px] text-slate-500">Total cumulé sur la plateforme</span>
-                    </div>
-
-                    <div className="bg-white rounded-2xl border border-slate-200/80 p-5 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-slate-500">
-                          Bilans consultés
-                        </span>
-                        <BarChart3 className="w-4 h-4 text-[#087A50]" />
-                      </div>
-                      <p className="text-2xl font-black text-slate-900 tabular-nums">
-                        {globalActivity.totalReportsViewed.toLocaleString('fr-FR')}
-                      </p>
-                      <span className="text-[11px] text-slate-500">Ouvertures de l'onglet Bilan</span>
                     </div>
 
                     <div className="bg-white rounded-2xl border border-slate-200/80 p-5 space-y-1">

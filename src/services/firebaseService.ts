@@ -27,8 +27,6 @@ import {
 } from '../types';
 import { convertAmount } from '../utils/currency';
 
-export const BOOTSTRAP_ADMIN_EMAIL = 'okombacontact@gmail.com';
-
 const VALID_CURRENCIES: SupportedCurrency[] = ['XOF', 'XAF', 'CDF', 'EUR'];
 
 function sanitizeStr(value: string | undefined | null, fallback: string, maxLen: number): string {
@@ -68,8 +66,9 @@ export interface VerifiedRoleResolution {
 }
 
 /**
- * Vérification sécurisée du rôle à partir du token Firebase (Custom Claims)
- * et du registre /admins/{uid}. Ne fait jamais confiance à une valeur locale modifiable.
+ * Vérification sécurisée du rôle à partir du token Firebase (Custom Claims),
+ * du registre /admins/{uid} et des règles serveur Firestore.
+ * Aucun e-mail administrateur n'est exposé en dur côté client.
  */
 export async function resolveUserRole(
   firebaseUser: FirebaseUser,
@@ -78,29 +77,29 @@ export async function resolveUserRole(
   const tokenResult = await firebaseUser.getIdTokenResult(forceRefresh);
   const claims = tokenResult.claims || {};
   const emailVerified = Boolean(firebaseUser.emailVerified);
-  const emailLower = (firebaseUser.email || '').toLowerCase();
 
   // 1. Custom Claims Firebase (ex: { role: 'ADMIN' } ou { admin: true })
   if (emailVerified && (claims.role === 'ADMIN' || claims.admin === true)) {
     return { role: 'ADMIN', source: 'custom_claim', emailVerified };
   }
 
-  // 2. Email administrateur principal vérifié
-  if (emailVerified && emailLower === BOOTSTRAP_ADMIN_EMAIL) {
-    return { role: 'ADMIN', source: 'bootstrap_email', emailVerified };
-  }
-
-  // 3. Vérification dans le registre protégé /admins/{uid}
+  // 2. Vérification dans le registre protégé /admins/{uid}
   if (emailVerified) {
-    const adminPath = `admins/${firebaseUser.uid}`;
     try {
       const adminSnap = await getDoc(doc(db, 'admins', firebaseUser.uid));
       if (adminSnap.exists()) {
         return { role: 'ADMIN', source: 'admin_registry', emailVerified };
       }
     } catch {
-      // Si la lecture est refusée par les règles, l'utilisateur n'est pas admin.
-      console.warn(`Admin check fallback for ${adminPath}`);
+      // L'utilisateur n'est pas autorisé dans /admins/{uid}
+    }
+
+    // 3. Vérification côté serveur via lecture de admin_stats/settings (autorisée uniquement par firestore.rules pour isAdmin())
+    try {
+      await getDoc(doc(db, 'admin_stats', 'settings'));
+      return { role: 'ADMIN', source: 'bootstrap_email', emailVerified };
+    } catch {
+      // Refusé par les règles serveur : compte utilisateur standard
     }
   }
 
@@ -118,7 +117,7 @@ export async function ensureAdminRegistryEntry(firebaseUser: FirebaseUser): Prom
     if (!snap.exists()) {
       await setDoc(ref, {
         uid: firebaseUser.uid,
-        email: sanitizeStr(firebaseUser.email, BOOTSTRAP_ADMIN_EMAIL, 200),
+        email: sanitizeStr(firebaseUser.email, 'admin@talambongo.app', 200),
         displayName: sanitizeStr(firebaseUser.displayName || firebaseUser.email?.split('@')[0], 'Administrateur', 120),
         grantedBy: 'system_bootstrap',
         createdAt: serverTimestamp(),

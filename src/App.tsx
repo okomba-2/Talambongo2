@@ -8,8 +8,13 @@ import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { SplashScreen } from '@capacitor/splash-screen';
 import { App as CapApp } from '@capacitor/app';
-import { onIdTokenChanged, signOut, User as FirebaseUser } from 'firebase/auth';
-import { auth } from './firebase';
+import {
+  getRedirectResult,
+  onIdTokenChanged,
+  signOut,
+  User as FirebaseUser,
+} from 'firebase/auth';
+import { auth, browserPopupRedirectResolver } from './firebase';
 import {
   deleteExpenseFromFirestore,
   ensureAdminRegistryEntry,
@@ -95,77 +100,126 @@ export default function App() {
     return validExpenses;
   });
 
-  // Écoute sécurisée de Firebase Auth & renouvellement du token (onIdTokenChanged)
+  // Écoute sécurisée de Firebase Auth, persistance de session et retour de redirection Google
   useEffect(() => {
-    const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
-      if (!fbUser) {
-        lastResolvedUidRef.current = null;
-        setFirebaseUser(null);
-        setRoleResolution(null);
-        localStorage.removeItem('talambongo_auth_active');
-        setView((prev) => (prev === 'auth' ? 'auth' : 'landing'));
-        setAuthChecking(false);
-        return;
+    let isMounted = true;
+    let unsubscribe: (() => void) | undefined;
+
+    const initAuth = async () => {
+      try {
+        // Récupérer un éventuel retour après signInWithRedirect (mobile / popup bloquée)
+        const redirectCred = await getRedirectResult(auth, browserPopupRedirectResolver).catch(
+          () => null
+        );
+        const pendingRedirectMode = sessionStorage.getItem('talambongo_pending_auth_mode') as
+          | 'signup'
+          | 'login'
+          | null;
+        if (redirectCred?.user && pendingRedirectMode) {
+          pendingAuthRef.current = {
+            name: redirectCred.user.displayName || undefined,
+            mode: pendingRedirectMode,
+          };
+          sessionStorage.removeItem('talambongo_pending_auth_mode');
+        }
+
+        // Attendre que la persistance locale Firebase Auth soit complètement restaurée
+        await auth.authStateReady();
+      } catch (err) {
+        console.error('Auth hydration error:', err);
       }
 
-      try {
-        setFirebaseUser(fbUser);
-        const resolved = await resolveUserRole(fbUser);
-        setRoleResolution(resolved);
+      if (!isMounted) return;
 
-        const isNewSessionResolution = lastResolvedUidRef.current !== fbUser.uid;
-        lastResolvedUidRef.current = fbUser.uid;
+      unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
+        if (!isMounted) return;
 
-        if (resolved.role === 'ADMIN') {
-          await ensureAdminRegistryEntry(fbUser);
-          const pending = pendingAuthRef.current;
-          const syncedProfile = await syncUserAccountOnAuth(
-            fbUser,
-            'ADMIN',
-            pending?.name,
-            pending?.mode
-          );
-          pendingAuthRef.current = null;
-          setUser(syncedProfile);
-          localStorage.setItem('talambongo_auth_active', 'true');
-          // L'interface administrateur reste en mode clair contrasté
-          document.documentElement.classList.remove('dark');
-          setView('admin');
-        } else {
-          const pending = pendingAuthRef.current;
-          if (isNewSessionResolution || pending) {
+        if (!fbUser) {
+          lastResolvedUidRef.current = null;
+          setFirebaseUser(null);
+          setRoleResolution(null);
+          localStorage.removeItem('talambongo_auth_active');
+          setView((prev) => (prev === 'auth' ? 'auth' : 'landing'));
+          setAuthChecking(false);
+          return;
+        }
+
+        try {
+          setFirebaseUser(fbUser);
+          const resolved = await resolveUserRole(fbUser);
+          if (!isMounted) return;
+          setRoleResolution(resolved);
+
+          const isNewSessionResolution = lastResolvedUidRef.current !== fbUser.uid;
+          lastResolvedUidRef.current = fbUser.uid;
+
+          if (resolved.role === 'ADMIN') {
+            await ensureAdminRegistryEntry(fbUser);
+            const pending = pendingAuthRef.current;
             const syncedProfile = await syncUserAccountOnAuth(
               fbUser,
-              'USER',
+              'ADMIN',
               pending?.name,
               pending?.mode
             );
             pendingAuthRef.current = null;
+            if (!isMounted) return;
             setUser(syncedProfile);
-
-            const cloudExpenses = await loadUserExpensesFromFirestore(fbUser.uid);
-            const { validExpenses } = pruneExpiredExpenses(cloudExpenses);
-            setExpenses(validExpenses);
-
             localStorage.setItem('talambongo_auth_active', 'true');
-            if (syncedProfile.onboardingCompleted === false) {
-              setView('onboarding');
-            } else {
-              setView('app');
-            }
+            document.documentElement.classList.remove('dark');
+            setView('admin');
           } else {
-            // Vérification continue lors du rafraîchissement du token : empêcher l'accès admin si rôle USER
-            setView((prev) => (prev === 'admin' ? 'app' : prev));
+            const pending = pendingAuthRef.current;
+            if (isNewSessionResolution || pending) {
+              const syncedProfile = await syncUserAccountOnAuth(
+                fbUser,
+                'USER',
+                pending?.name,
+                pending?.mode
+              );
+              pendingAuthRef.current = null;
+              if (!isMounted) return;
+              setUser(syncedProfile);
+
+              const cloudExpenses = await loadUserExpensesFromFirestore(fbUser.uid);
+              const { validExpenses } = pruneExpiredExpenses(cloudExpenses);
+              if (!isMounted) return;
+              setExpenses(validExpenses);
+
+              localStorage.setItem('talambongo_auth_active', 'true');
+              if (syncedProfile.onboardingCompleted === false) {
+                setView('onboarding');
+              } else {
+                setView('app');
+              }
+            } else {
+              // Vérification continue lors du rafraîchissement du token : empêcher l'accès admin si rôle USER
+              setView((prev) =>
+                prev === 'admin' || prev === 'landing' || prev === 'auth' ? 'app' : prev
+              );
+            }
+          }
+        } catch (err) {
+          console.error('Erreur vérification session Firebase:', err);
+          // Si l'utilisateur Firebase est authentifié mais temporairement hors-ligne, garder sa session active
+          if (fbUser && isMounted) {
+            localStorage.setItem('talambongo_auth_active', 'true');
+            setView((prev) => (prev === 'landing' || prev === 'auth' ? 'app' : prev));
+          }
+        } finally {
+          if (isMounted) {
+            setAuthChecking(false);
           }
         }
-      } catch (err) {
-        console.error('Erreur vérification rôle Firebase:', err);
-      } finally {
-        setAuthChecking(false);
-      }
-    });
+      });
+    };
 
-    return () => unsubscribe();
+    initAuth();
+
+    return () => {
+      isMounted = false;
+      if (unsubscribe) unsubscribe();
+    };
   }, []);
 
   // Rétention mensuelle : les données du mois précédent sont automatiquement supprimées le 3 de chaque mois
@@ -226,7 +280,7 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Auth Success -> stores user intent; actual redirection is strictly governed by verified Firebase role in onIdTokenChanged
+  // Auth Success -> stores user intent; actual redirection is strictly governed by verified Firebase role
   const handleAuthSuccess = (
     userInfo: { name: string; email: string },
     mode: 'signup' | 'login'
@@ -237,6 +291,7 @@ export default function App() {
       resolveUserRole(auth.currentUser, true)
         .then(async (resolved) => {
           setRoleResolution(resolved);
+          lastResolvedUidRef.current = auth.currentUser!.uid;
           if (resolved.role === 'ADMIN') {
             await ensureAdminRegistryEntry(auth.currentUser!);
             const synced = await syncUserAccountOnAuth(
@@ -350,7 +405,7 @@ export default function App() {
           const planType =
             updated.subscriptionType === 'quarterly' ? 'quarterly' : 'monthly';
           const activeCurrency = merged.currency || 'XOF';
-          const baseXof = planType === 'quarterly' ? 2700 : 1000;
+          const baseXof = planType === 'quarterly' ? 1200 : 500;
           const amount =
             activeCurrency === 'EUR'
               ? Math.round(convertAmount(baseXof, 'XOF', 'EUR') * 100) / 100

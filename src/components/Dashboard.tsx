@@ -64,11 +64,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Devise active de l'utilisateur (globale dans toute la plateforme)
   const activeCurrency: SupportedCurrency = user.currency || 'XOF';
 
-  // Montants d'abonnement calculés dynamiquement depuis le prix de référence inaltérable de 1 000 XOF
-  const subMonthlyPrice = convertAmount(1000, 'XOF', activeCurrency);
-  const subQuarterlyPrice = convertAmount(2700, 'XOF', activeCurrency);
+  // Montants d'abonnement calculés dynamiquement depuis le prix de référence inaltérable de 500 XOF / mois et 1 200 XOF / 3 mois
+  const subMonthlyPrice = convertAmount(500, 'XOF', activeCurrency);
+  const subQuarterlyPrice = convertAmount(1200, 'XOF', activeCurrency);
   const subSavingsPrice = convertAmount(300, 'XOF', activeCurrency);
-  const subPerMonthQuarterly = convertAmount(900, 'XOF', activeCurrency);
+  const subPerMonthQuarterly = convertAmount(400, 'XOF', activeCurrency);
 
   // Détection automatique de la date actuelle de l'appareil
   const deviceDate = useMemo(() => new Date(), []);
@@ -1364,7 +1364,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               type="text"
                               value={editedName}
                               onChange={(e) => setEditedName(e.target.value)}
-                              placeholder="Ex : David Okomba"
+                              placeholder="Ex : Jean Kabila"
                               required
                               autoFocus
                               className="px-3 py-1.5 rounded-xl border border-gray-200 text-sm font-bold text-gray-900 focus:outline-none focus:border-emerald-600 bg-white min-w-[180px]"

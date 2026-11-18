@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
-import { Eye, ArrowLeft, Mail, Lock, User, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, Mail, Lock, User, CheckCircle2, AlertCircle } from 'lucide-react';
 import { motion } from 'motion/react';
 import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   updateProfile,
 } from 'firebase/auth';
-import { auth, googleProvider } from '../firebase';
+import { auth, browserPopupRedirectResolver, googleProvider } from '../firebase';
 
 interface AuthScreenProps {
   onSuccess: (user: { name: string; email: string }, mode: 'signup' | 'login') => void;
@@ -18,6 +19,9 @@ interface AuthScreenProps {
 
 function getFriendlyFirebaseAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code || '';
+  const currentHost =
+    typeof window !== 'undefined' ? window.location.hostname : '';
+
   switch (code) {
     case 'auth/invalid-credential':
     case 'auth/wrong-password':
@@ -35,6 +39,8 @@ function getFriendlyFirebaseAuthError(err: unknown): string {
       return 'La fenêtre de connexion Google a été fermée avant la fin.';
     case 'auth/popup-blocked':
       return 'Ton navigateur a bloqué la fenêtre Google. Autorise les popups puis réessaie.';
+    case 'auth/unauthorized-domain':
+      return `Ce domaine (${currentHost}) n’est pas encore autorisé pour la connexion Google. Ajoute « ${currentHost} » dans Firebase Console → Authentication → Settings → Authorized domains.`;
     case 'auth/operation-not-allowed':
       return 'La connexion par e-mail/mot de passe n’est pas encore activée dans Firebase Console. Utilise « Continuer avec Google » ci-dessous ou active Email/Password dans Authentication > Sign-in method.';
     default:
@@ -51,6 +57,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -111,7 +118,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setErrorMessage(null);
     setInfoMessage(null);
     try {
-      const cred = await signInWithPopup(auth, googleProvider);
+      const cred = await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
       const userEmail = cred.user.email || '';
       const userName =
         cred.user.displayName ||
@@ -125,7 +132,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         mode === 'signup' ? 'signup' : 'login'
       );
     } catch (err) {
-      setErrorMessage(getFriendlyFirebaseAuthError(err));
+      const code = (err as { code?: string })?.code || '';
+      // Fallback automatique par redirection si la popup est bloquée ou non supportée dans l'environnement déployé (PWA/mobile)
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          sessionStorage.setItem('talambongo_pending_auth_mode', mode === 'signup' ? 'signup' : 'login');
+          await signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
+          return;
+        } catch (redirectErr) {
+          setErrorMessage(getFriendlyFirebaseAuthError(redirectErr));
+        }
+      } else {
+        setErrorMessage(getFriendlyFirebaseAuthError(err));
+      }
     } finally {
       setLoading(false);
     }
@@ -210,7 +232,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     required
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
-                    placeholder="David Okomba"
+                    placeholder="Ex : Jean Kabila"
                     className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#fafbfc] border border-gray-200 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-emerald-600 focus:bg-white transition"
                   />
                 </div>
@@ -236,7 +258,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               </div>
             </div>
 
-            {/* 3. Mot de passe (si ce n'est pas en mode mot de passe oublié) */}
+            {/* 3. Mot de passe avec bouton Afficher / Masquer */}
             {mode !== 'forgot' && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -261,13 +283,23 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
                     id="auth-password-input"
-                    type="password"
+                    type={showPassword ? 'text' : 'password'}
                     required
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#fafbfc] border border-gray-200 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-emerald-600 focus:bg-white transition"
+                    className="w-full pl-10 pr-11 py-3 rounded-2xl bg-[#fafbfc] border border-gray-200 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-emerald-600 focus:bg-white transition"
                   />
+                  <button
+                    id="auth-toggle-password-visibility"
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    aria-label={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+                    title={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
               </div>
             )}

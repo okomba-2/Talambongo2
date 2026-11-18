@@ -25,11 +25,11 @@ export const PricingSection: React.FC<PricingSectionProps> = ({ currency, onSele
     return 'XOF';
   })();
 
-  // Calculs dynamiques basés sur le prix de référence inaltérable de 1 000 XOF
-  const monthlyPrice = convertAmount(1000, 'XOF', activeCurrency);
-  const quarterlyPrice = convertAmount(2700, 'XOF', activeCurrency);
+  // Calculs dynamiques basés sur le prix de référence inaltérable de 500 XOF / mois et 1 200 XOF / 3 mois
+  const monthlyPrice = convertAmount(500, 'XOF', activeCurrency);
+  const quarterlyPrice = convertAmount(1200, 'XOF', activeCurrency);
   const savingsPrice = convertAmount(300, 'XOF', activeCurrency);
-  const perMonthQuarterlyPrice = convertAmount(900, 'XOF', activeCurrency);
+  const perMonthQuarterlyPrice = convertAmount(400, 'XOF', activeCurrency);
   const freePrice = formatCurrency(0, activeCurrency);
 
   return (
@@ -112,7 +112,7 @@ export const PricingSection: React.FC<PricingSectionProps> = ({ currency, onSele
               </span>
               <h3 className="text-2xl font-black text-gray-900">Premium</h3>
 
-              {/* Toggle option between monthly (1 000 XOF / mois) and 3 mois (2 700 XOF) */}
+              {/* Toggle option between monthly (500 XOF / mois) and 3 mois (1 200 XOF) */}
               <div className="p-1 rounded-xl bg-gray-100/90 flex gap-1 text-xs font-semibold">
                 <button
                   type="button"
