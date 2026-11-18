@@ -298,7 +298,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const totalExpensesLogged = payload.users.reduce((acc, u) => acc + u.expensesCount, 0);
       const totalReportsViewed = payload.users.reduce((acc, u) => acc + u.reportsViewedCount, 0);
       const totalPdfExports = payload.users.reduce((acc, u) => acc + u.pdfExportsCount, 0);
-      const usersWithExpenses = payload.users.filter((u) => u.expensesCount > 0).length;
+      const usersWithExpenses = payload.users.filter((u) => u.expensesCount >= 10).length;
 
       await syncAdminStatsSummary({
         totalUsers: payload.users.length,
@@ -615,7 +615,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const totalExpensesLogged = users.reduce((acc, u) => acc + u.expensesCount, 0);
     const totalReportsViewed = users.reduce((acc, u) => acc + u.reportsViewedCount, 0);
     const totalPdfExports = users.reduce((acc, u) => acc + u.pdfExportsCount, 0);
-    const usersWithExpenses = users.filter((u) => u.expensesCount > 0).length;
+    const usersWithExpenses = users.filter((u) => u.expensesCount >= 10).length;
     const activationRate =
       users.length > 0 ? Math.round((usersWithExpenses / users.length) * 100) : 0;
 
@@ -1888,7 +1888,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="bg-white rounded-2xl border border-slate-200/80 p-5 space-y-1">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-semibold text-slate-500">
-                          Utilisateurs ayant saisi ≥ 1 dépense
+                          Utilisateurs ayant saisi ≥ 10 dépenses
                         </span>
                         <Activity className="w-4 h-4 text-[#087A50]" />
                       </div>

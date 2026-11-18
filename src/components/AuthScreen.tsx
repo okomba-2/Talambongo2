@@ -19,8 +19,13 @@ interface AuthScreenProps {
 
 function getFriendlyFirebaseAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code || '';
+  const rawMessage = err instanceof Error ? err.message : String(err || '');
   const currentHost =
     typeof window !== 'undefined' ? window.location.hostname : '';
+
+  if (code === 'auth/unauthorized-domain' || rawMessage.includes('auth/unauthorized-domain')) {
+    return `Ce domaine (${currentHost}) n’est pas encore autorisé pour la connexion Google. Ajoute « ${currentHost} » dans Firebase Console → Authentication → Settings → Authorized domains.`;
+  }
 
   switch (code) {
     case 'auth/invalid-credential':
@@ -39,12 +44,10 @@ function getFriendlyFirebaseAuthError(err: unknown): string {
       return 'La fenêtre de connexion Google a été fermée avant la fin.';
     case 'auth/popup-blocked':
       return 'Ton navigateur a bloqué la fenêtre Google. Autorise les popups puis réessaie.';
-    case 'auth/unauthorized-domain':
-      return `Ce domaine (${currentHost}) n’est pas encore autorisé pour la connexion Google. Ajoute « ${currentHost} » dans Firebase Console → Authentication → Settings → Authorized domains.`;
     case 'auth/operation-not-allowed':
       return 'La connexion par e-mail/mot de passe n’est pas encore activée dans Firebase Console. Utilise « Continuer avec Google » ci-dessous ou active Email/Password dans Authentication > Sign-in method.';
     default:
-      return err instanceof Error ? err.message : 'Une erreur est survenue lors de l’authentification.';
+      return rawMessage || 'Une erreur est survenue lors de l’authentification.';
   }
 }
 
