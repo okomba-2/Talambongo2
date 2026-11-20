@@ -15,13 +15,23 @@
         "subscriptionType": { "type": "string", "enum": ["free_trial", "monthly", "quarterly"] },
         "subscriptionStartAt": { "type": "string", "maxLength": 40 },
         "subscriptionEndAt": { "type": "string", "maxLength": 40 },
+        "subscriptionEndAtTs": { "type": "string", "format": "date-time" },
+        "lastConfirmedSubscriptionId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "trialDaysLeft": { "type": "number" },
+        "trialStartedAt": { "type": "string", "format": "date-time" },
+        "trialEndsAt": { "type": "string", "format": "date-time" },
+        "hasUsedFreeTrial": { "type": "boolean" },
         "mainGoal": { "type": "string", "maxLength": 150 },
         "trackingFrequency": { "type": "string", "maxLength": 80 },
         "onboardingCompleted": { "type": "boolean" },
         "expensesCount": { "type": "number" },
         "reportsViewedCount": { "type": "number" },
         "pdfExportsCount": { "type": "number" },
+        "referredByPartnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referredByCode": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "referralSource": { "type": "string", "enum": ["link", "manual"] },
+        "referralSessionId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referralAttributedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" },
         "lastActiveAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -77,6 +87,8 @@
         "amountXof": { "type": "number" },
         "startDate": { "type": "string", "maxLength": 40 },
         "endDate": { "type": "string", "maxLength": 40 },
+        "endAtTs": { "type": "string", "format": "date-time" },
+        "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -128,6 +140,159 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["updatedAt"]
+    },
+    "Partner": {
+      "title": "Partner",
+      "description": "Partenaire influenceur ou affilié TalaMbongo (lecture et gestion strictement réservées aux administrateurs).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "channelName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "socialNetwork": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "contactInfo": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "code": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "referralLink": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "fixedAdFeeXof": { "type": "number" },
+        "commissionPerUserXof": { "type": "number" },
+        "commissionType": { "type": "string", "enum": ["first_payment_only"] },
+        "status": { "type": "string", "enum": ["active", "suspended", "disabled"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "name",
+        "channelName",
+        "socialNetwork",
+        "contactInfo",
+        "code",
+        "referralLink",
+        "startDate",
+        "endDate",
+        "fixedAdFeeXof",
+        "commissionPerUserXof",
+        "commissionType",
+        "status",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PartnerLink": {
+      "title": "PartnerLink",
+      "description": "Index public minimal sans données personnelles permettant de vérifier la validité et l'expiration d'un code de parrainage.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "partnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["active", "suspended", "disabled"] },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "commissionPerUserXof": { "type": "number" },
+        "commissionType": { "type": "string", "enum": ["first_payment_only"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "code",
+        "partnerId",
+        "status",
+        "startDate",
+        "endDate",
+        "commissionPerUserXof",
+        "commissionType",
+        "updatedAt"
+      ]
+    },
+    "PartnerClick": {
+      "title": "PartnerClick",
+      "description": "Journal des clics sur un lien de parrainage actif et valide.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "partnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "sessionToken": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "landingPath": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "partnerId", "code", "sessionToken", "landingPath", "createdAt"]
+    },
+    "ReferralSession": {
+      "title": "ReferralSession",
+      "description": "Attribution temporaire enregistrée en base pendant le parcours d'inscription.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "partnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "clickId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["pending", "consumed"] },
+        "usedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "partnerId", "code", "clickId", "status", "createdAt", "updatedAt"]
+    },
+    "PartnerCommission": {
+      "title": "PartnerCommission",
+      "description": "Commission partenaire unique déclenchée sur le premier paiement confirmé d'un utilisateur parrainé.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "partnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referralCode": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "anonymizedUserRef": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "subscriptionId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "planType": { "type": "string", "enum": ["monthly", "quarterly"] },
+        "paymentAmountXof": { "type": "number" },
+        "amountXof": { "type": "number" },
+        "commissionType": { "type": "string", "enum": ["first_payment_only"] },
+        "status": { "type": "string", "enum": ["pending", "paid"] },
+        "paidAt": { "type": "string", "format": "date-time" },
+        "payoutReference": { "type": "string", "maxLength": 120 },
+        "payoutNote": { "type": "string", "maxLength": 300 },
+        "paidByAdminUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "partnerId",
+        "referralCode",
+        "userId",
+        "anonymizedUserRef",
+        "subscriptionId",
+        "planType",
+        "paymentAmountXof",
+        "amountXof",
+        "commissionType",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PartnerAuditLog": {
+      "title": "PartnerAuditLog",
+      "description": "Journal immuable des opérations administrateur sur les partenaires et règlements de commissions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "enum": ["partner_created", "partner_updated", "partner_status_changed", "commission_paid"] },
+        "partnerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "partnerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "partnerCode": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[A-Z0-9_\\-]+$" },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "details": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "amountXof": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "action", "partnerId", "partnerName", "partnerCode", "actorUid", "details", "createdAt"]
     }
   },
   "firestore": {
@@ -150,6 +315,30 @@
     "/admin_stats/{statId}": {
       "schema": { "$ref": "#/entities/AdminStatsSnapshot" },
       "description": "Cache d'agrégation des statistiques globales administrateur et configuration."
+    },
+    "/partners/{partnerId}": {
+      "schema": { "$ref": "#/entities/Partner" },
+      "description": "Fiches complètes des partenaires publicitaires et d'affiliation (administrateurs uniquement)."
+    },
+    "/partner_links/{code}": {
+      "schema": { "$ref": "#/entities/PartnerLink" },
+      "description": "Index public minimal sans PII pour la validation des codes de parrainage par document exact."
+    },
+    "/partner_clicks/{clickId}": {
+      "schema": { "$ref": "#/entities/PartnerClick" },
+      "description": "Suivi des clics validés sur les liens de parrainage actifs."
+    },
+    "/referral_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ReferralSession" },
+      "description": "Sessions temporaires d'attribution en base durant le parcours d'inscription."
+    },
+    "/partner_commissions/{commissionId}": {
+      "schema": { "$ref": "#/entities/PartnerCommission" },
+      "description": "Commissions uniques par utilisateur parrainé lors du premier paiement confirmé."
+    },
+    "/partner_audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/PartnerAuditLog" },
+      "description": "Historique immuable des opérations administrateur sur les partenaires et paiements."
     }
   }
 }

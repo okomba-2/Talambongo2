@@ -12,6 +12,7 @@ import {
   Eye,
   FileText,
   Globe2,
+  Handshake,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -29,7 +30,9 @@ import {
 } from 'lucide-react';
 import {
   AdminDashboardPayload,
+  AdminPartnersPayload,
   fetchAdminDashboardData,
+  fetchAdminPartnersData,
   grantAdminAccess,
   revokeAdminAccess,
   saveAdminSettings,
@@ -41,9 +44,14 @@ import {
   AdminSettingsConfig,
   FirestoreSubscriptionRecord,
   FirestoreUserAccount,
+  Partner,
+  PartnerAuditLog,
+  PartnerClickRecord,
+  PartnerCommissionRecord,
   SupportedCurrency,
 } from '../types';
 import { convertAmount, formatCurrency, SUPPORTED_CURRENCIES } from '../utils/currency';
+import { AdminPartnersSection } from './AdminPartnersSection';
 
 type AdminTab =
   | 'overview'
@@ -53,6 +61,7 @@ type AdminTab =
   | 'subscriptions'
   | 'revenues'
   | 'activity'
+  | 'partners'
   | 'settings';
 
 type PeriodPreset =
@@ -209,7 +218,19 @@ function formatDateShort(ms: number): string {
 }
 
 function isUserPaid(u: FirestoreUserAccount): boolean {
-  return u.subscriptionStatus === 'active' || u.subscriptionStatus === 'renewed';
+  if (u.subscriptionStatus !== 'active' && u.subscriptionStatus !== 'renewed') {
+    return false;
+  }
+  const endMs =
+    typeof u.subscriptionEndAtMs === 'number'
+      ? u.subscriptionEndAtMs
+      : u.subscriptionEndAt
+      ? Date.parse(u.subscriptionEndAt)
+      : NaN;
+  if (!Number.isNaN(endMs) && endMs <= Date.now()) {
+    return false;
+  }
+  return true;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -229,6 +250,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [users, setUsers] = useState<FirestoreUserAccount[]>([]);
   const [subscriptions, setSubscriptions] = useState<FirestoreSubscriptionRecord[]>([]);
   const [admins, setAdmins] = useState<AdminRegistryEntry[]>([]);
+  const [partners, setPartners] = useState<Partner[]>([]);
+  const [partnerClicks, setPartnerClicks] = useState<PartnerClickRecord[]>([]);
+  const [partnerCommissions, setPartnerCommissions] = useState<PartnerCommissionRecord[]>([]);
+  const [partnerAuditLogs, setPartnerAuditLogs] = useState<PartnerAuditLog[]>([]);
   const [settings, setSettings] = useState<AdminSettingsConfig>({
     activeActivityThresholdDays: 30,
     defaultAdminCurrency: 'XOF',
@@ -274,10 +299,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setErrorMsg(null);
 
     try {
-      const payload: AdminDashboardPayload = await fetchAdminDashboardData();
+      const [payload, partnersPayload]: [AdminDashboardPayload, AdminPartnersPayload] =
+        await Promise.all([fetchAdminDashboardData(), fetchAdminPartnersData()]);
       setUsers(payload.users);
       setSubscriptions(payload.subscriptions);
       setAdmins(payload.admins);
+      setPartners(partnersPayload.partners);
+      setPartnerClicks(partnersPayload.clicks);
+      setPartnerCommissions(partnersPayload.commissions);
+      setPartnerAuditLogs(partnersPayload.auditLogs);
       setSettings(payload.settings);
       setThresholdInput(payload.settings.activeActivityThresholdDays);
       setDefaultCurrencyInput(payload.settings.defaultAdminCurrency);
@@ -737,6 +767,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     { id: 'subscriptions', label: 'Abonnements', icon: CreditCard },
     { id: 'revenues', label: 'Revenus', icon: DollarSign },
     { id: 'activity', label: 'Activité globale', icon: Activity },
+    { id: 'partners', label: 'Partenaires', icon: Handshake },
     { id: 'settings', label: 'Paramètres administrateur', icon: Settings },
   ];
 
@@ -1969,7 +2000,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
 
               {/* ===================================================== */}
-              {/* 8. PARAMÈTRES ADMINISTRATEUR                          */}
+              {/* 8. PARTENAIRES & PARRAINAGE                           */}
+              {/* ===================================================== */}
+              {activeTab === 'partners' && (
+                <AdminPartnersSection
+                  currentAdminUid={currentAdminUid}
+                  selectedCurrency={selectedCurrency}
+                  partners={partners}
+                  clicks={partnerClicks}
+                  commissions={partnerCommissions}
+                  auditLogs={partnerAuditLogs}
+                  users={users}
+                  subscriptions={subscriptions}
+                  onRefresh={() => loadData(true)}
+                />
+              )}
+
+              {/* ===================================================== */}
+              {/* 9. PARAMÈTRES ADMINISTRATEUR                          */}
               {/* ===================================================== */}
               {activeTab === 'settings' && (
                 <div className="space-y-6">

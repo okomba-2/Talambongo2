@@ -15,42 +15,22 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 
+import {
+  COUNTRY_CURRENCY_OPTIONS,
+  getCurrencyForCountry,
+  SUPPORTED_CURRENCIES,
+} from '../utils/currency';
+import { SupportedCurrency } from '../types';
+
 interface OnboardingProps {
   userName: string;
   onComplete: (data: {
     country: string;
+    currency: SupportedCurrency;
     mainGoal: string;
     trackingFrequency: string;
   }) => void;
 }
-
-interface CountryOption {
-  code: string;
-  name: string;
-  flag: string;
-}
-
-const COUNTRIES: CountryOption[] = [
-  { code: 'CG', name: 'Congo-Brazzaville', flag: '🇨🇬' },
-  { code: 'CD', name: 'RD Congo', flag: '🇨🇩' },
-  { code: 'CI', name: 'Côte d’Ivoire', flag: '🇨🇮' },
-  { code: 'CM', name: 'Cameroun', flag: '🇨🇲' },
-  { code: 'SN', name: 'Sénégal', flag: '🇸🇳' },
-  { code: 'GA', name: 'Gabon', flag: '🇬🇦' },
-  { code: 'BJ', name: 'Bénin', flag: '🇧🇯' },
-  { code: 'TG', name: 'Togo', flag: '🇹🇬' },
-  { code: 'ML', name: 'Mali', flag: '🇲🇱' },
-  { code: 'BF', name: 'Burkina Faso', flag: '🇧🇫' },
-  { code: 'GN', name: 'Guinée', flag: '🇬🇳' },
-  { code: 'NE', name: 'Niger', flag: '🇳🇪' },
-  { code: 'TD', name: 'Tchad', flag: '🇹🇩' },
-  { code: 'RW', name: 'Rwanda', flag: '🇷🇼' },
-  { code: 'BI', name: 'Burundi', flag: '🇧🇮' },
-  { code: 'FR', name: 'France', flag: '🇫🇷' },
-  { code: 'BE', name: 'Belgique', flag: '🇧🇪' },
-  { code: 'CA', name: 'Canada', flag: '🇨🇦' },
-  { code: 'OTHER', name: 'Autre pays', flag: '🌍' },
-];
 
 const GOALS = [
   {
@@ -103,16 +83,19 @@ const FREQUENCIES = [
 
 export function Onboarding({ userName, onComplete }: OnboardingProps) {
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
-  const [selectedCountry, setSelectedCountry] = useState<string>('Congo-Brazzaville');
+  const [selectedCountry, setSelectedCountry] = useState<string>('');
   const [countrySearch, setCountrySearch] = useState<string>('');
   const [selectedGoal, setSelectedGoal] = useState<string>('Comprendre où va mon argent');
   const [selectedFrequency, setSelectedFrequency] = useState<string>('Tous les jours');
 
-  const filteredCountries = COUNTRIES.filter((c) =>
+  const filteredCountries = COUNTRY_CURRENCY_OPTIONS.filter((c) =>
     c.name.toLowerCase().includes(countrySearch.toLowerCase().trim())
   );
 
+  const selectedCurrency: SupportedCurrency = getCurrencyForCountry(selectedCountry);
+
   const handleNext = () => {
+    if (step === 1 && !selectedCountry) return;
     if (step < 4) {
       setStep((prev) => (prev + 1) as 1 | 2 | 3 | 4);
     }
@@ -125,16 +108,22 @@ export function Onboarding({ userName, onComplete }: OnboardingProps) {
   };
 
   const handleFinish = () => {
+    if (!selectedCountry) {
+      setStep(1);
+      return;
+    }
     onComplete({
       country: selectedCountry,
+      currency: selectedCurrency,
       mainGoal: selectedGoal,
       trackingFrequency: selectedFrequency,
     });
   };
 
-  const selectedCountryObj = COUNTRIES.find((c) => c.name === selectedCountry) || {
-    name: selectedCountry,
+  const selectedCountryObj = COUNTRY_CURRENCY_OPTIONS.find((c) => c.name === selectedCountry) || {
+    name: selectedCountry || 'Non sélectionné',
     flag: '🌍',
+    currency: selectedCurrency,
   };
 
   return (
@@ -224,11 +213,22 @@ export function Onboarding({ userName, onComplete }: OnboardingProps) {
                           </span>
                           <span className="text-sm font-semibold">{c.name}</span>
                         </div>
-                        {isSelected && (
-                          <div className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center">
-                            <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                          </div>
-                        )}
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-lg ${
+                              isSelected
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-gray-100 text-gray-600'
+                            }`}
+                          >
+                            {c.currency}
+                          </span>
+                          {isSelected && (
+                            <div className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center">
+                              <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                            </div>
+                          )}
+                        </div>
                       </button>
                     );
                   })
@@ -454,6 +454,12 @@ export function Onboarding({ userName, onComplete }: OnboardingProps) {
                   <span className="font-bold text-gray-900 flex items-center gap-1.5">
                     <span>{selectedCountryObj.flag}</span>
                     <span>{selectedCountryObj.name}</span>
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">Devise configurée</span>
+                  <span className="font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full">
+                    {selectedCurrency} • {SUPPORTED_CURRENCIES[selectedCurrency].label}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs">

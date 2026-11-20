@@ -44,6 +44,97 @@ export const SUPPORTED_CURRENCIES: Record<SupportedCurrency, CurrencyDetails> = 
   },
 };
 
+export interface CountryCurrencyOption {
+  code: string;
+  name: string;
+  flag: string;
+  currency: SupportedCurrency;
+}
+
+/**
+ * Configuration centralisée de correspondance Pays -> Devise.
+ * Garantit que chaque pays reçoit automatiquement sa devise officielle
+ * sans jamais appliquer l'euro par défaut à un pays utilisant le XOF, XAF ou CDF.
+ */
+export const COUNTRY_CURRENCY_OPTIONS: CountryCurrencyOption[] = [
+  { code: 'CG', name: 'Congo-Brazzaville', flag: '🇨🇬', currency: 'XAF' },
+  { code: 'CD', name: 'RD Congo', flag: '🇨🇩', currency: 'CDF' },
+  { code: 'CI', name: 'Côte d’Ivoire', flag: '🇨🇮', currency: 'XOF' },
+  { code: 'CM', name: 'Cameroun', flag: '🇨🇲', currency: 'XAF' },
+  { code: 'SN', name: 'Sénégal', flag: '🇸🇳', currency: 'XOF' },
+  { code: 'GA', name: 'Gabon', flag: '🇬🇦', currency: 'XAF' },
+  { code: 'BJ', name: 'Bénin', flag: '🇧🇯', currency: 'XOF' },
+  { code: 'TG', name: 'Togo', flag: '🇹🇬', currency: 'XOF' },
+  { code: 'ML', name: 'Mali', flag: '🇲🇱', currency: 'XOF' },
+  { code: 'BF', name: 'Burkina Faso', flag: '🇧🇫', currency: 'XOF' },
+  { code: 'GN', name: 'Guinée', flag: '🇬🇳', currency: 'XOF' },
+  { code: 'NE', name: 'Niger', flag: '🇳🇪', currency: 'XOF' },
+  { code: 'TD', name: 'Tchad', flag: '🇹🇩', currency: 'XAF' },
+  { code: 'CF', name: 'Centrafrique', flag: '🇨🇫', currency: 'XAF' },
+  { code: 'GQ', name: 'Guinée équatoriale', flag: '🇬🇶', currency: 'XAF' },
+  { code: 'GW', name: 'Guinée-Bissau', flag: '🇬🇼', currency: 'XOF' },
+  { code: 'RW', name: 'Rwanda', flag: '🇷🇼', currency: 'XAF' },
+  { code: 'BI', name: 'Burundi', flag: '🇧🇮', currency: 'XAF' },
+  { code: 'FR', name: 'France', flag: '🇫🇷', currency: 'EUR' },
+  { code: 'BE', name: 'Belgique', flag: '🇧🇪', currency: 'EUR' },
+  { code: 'LU', name: 'Luxembourg', flag: '🇱🇺', currency: 'EUR' },
+  { code: 'CH', name: 'Suisse', flag: '🇨🇭', currency: 'EUR' },
+  { code: 'DE', name: 'Allemagne', flag: '🇩🇪', currency: 'EUR' },
+  { code: 'ES', name: 'Espagne', flag: '🇪🇸', currency: 'EUR' },
+  { code: 'IT', name: 'Italie', flag: '🇮🇹', currency: 'EUR' },
+  { code: 'PT', name: 'Portugal', flag: '🇵🇹', currency: 'EUR' },
+  { code: 'NL', name: 'Pays-Bas', flag: '🇳🇱', currency: 'EUR' },
+  { code: 'CA', name: 'Canada', flag: '🇨🇦', currency: 'EUR' },
+  { code: 'OTHER', name: 'Autre pays', flag: '🌍', currency: 'XOF' },
+];
+
+export const COUNTRY_TO_CURRENCY: Record<string, SupportedCurrency> = COUNTRY_CURRENCY_OPTIONS.reduce(
+  (acc, item) => {
+    acc[item.name] = item.currency;
+    return acc;
+  },
+  {} as Record<string, SupportedCurrency>
+);
+
+function normalizeCountryKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’'`]/g, "'")
+    .replace(/\s+/g, ' ');
+}
+
+const NORMALIZED_COUNTRY_CURRENCY_MAP: Record<string, SupportedCurrency> = (() => {
+  const map: Record<string, SupportedCurrency> = {};
+  for (const item of COUNTRY_CURRENCY_OPTIONS) {
+    map[normalizeCountryKey(item.name)] = item.currency;
+  }
+  // Alias courants
+  map['rdc'] = 'CDF';
+  map['republique democratique du congo'] = 'CDF';
+  map['congo-kinshasa'] = 'CDF';
+  map['congo kinshasa'] = 'CDF';
+  map['congo brazzaville'] = 'XAF';
+  map['republique du congo'] = 'XAF';
+  map['cote d\'ivoire'] = 'XOF';
+  map['ivory coast'] = 'XOF';
+  return map;
+})();
+
+/**
+ * Retourne automatiquement la devise associée à un pays selon la configuration centralisée.
+ * Ne renvoie jamais EUR pour les pays utilisant XOF, XAF ou CDF.
+ */
+export function getCurrencyForCountry(country?: string | null): SupportedCurrency {
+  if (!country || typeof country !== 'string') {
+    return 'XOF';
+  }
+  const normalized = normalizeCountryKey(country);
+  return NORMALIZED_COUNTRY_CURRENCY_MAP[normalized] || 'XOF';
+}
+
 /**
  * Taux officiels fixés par accords monétaires internationaux :
  * - 1 EUR = 655.957 XOF (Parité fixe officielle BCEAO)

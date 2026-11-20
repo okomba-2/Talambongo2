@@ -27,15 +27,27 @@ import {
   Check,
   Pencil,
   UserCheck,
+  MessageCircle,
+  Smartphone,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Expense, ExpenseCategory, ExpenseMoment, SupportedCurrency, UserProfile } from '../types';
 import { CATEGORIES } from '../data/initialData';
 import { SUPPORTED_CURRENCIES, formatCurrency, convertAmount } from '../utils/currency';
 import { getExpiringSoonExpenses, getExpenseExpirationDate } from '../utils/historyRetention';
+import {
+  BrowserNotificationPermission,
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+  sendBrowserNotification,
+} from '../utils/notifications';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import { AddExpenseModal } from './AddExpenseModal';
 import { PdfExportModal } from './PdfExportModal';
-import { PWAInstallButton } from './PWAInstallButton';
+import { DiscreteInstallBanner, InstallGuideModal } from './PWAInstallButton';
+import { PremiumPaywall } from './PremiumPaywall';
+import { canAccessFeature, getSubscriptionAccessState } from '../utils/subscription';
+import { RecordedSubscriptionResult } from '../services/firebaseService';
 
 interface DashboardProps {
   user: UserProfile;
@@ -43,6 +55,10 @@ interface DashboardProps {
   onAddExpense: (expense: Omit<Expense, 'id' | 'createdAt'>) => void;
   onDeleteExpense: (id: string) => void;
   onUpdateUser: (updated: Partial<UserProfile>) => void;
+  onSubscribePlan: (
+    planType: 'monthly' | 'quarterly',
+    idempotencyKey?: string
+  ) => Promise<RecordedSubscriptionResult>;
   onLogout: () => void;
   onReportViewed?: () => void;
   onPdfExported?: () => void;
@@ -54,12 +70,32 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAddExpense,
   onDeleteExpense,
   onUpdateUser,
+  onSubscribePlan,
   onLogout,
   onReportViewed,
   onPdfExported,
 }) => {
   // Mobile Bottom Navigation Tab ('home' | 'calendar' | 'bilan' | 'profile')
   const [activeTab, setActiveTab] = useState<'home' | 'calendar' | 'bilan' | 'profile'>('home');
+
+  // Horloge temps réel pour détecter l'expiration exacte de l'essai ou de l'abonnement
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const refreshNow = () => setNowMs(Date.now());
+    const interval = window.setInterval(refreshNow, 60000);
+    window.addEventListener('focus', refreshNow);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshNow);
+    };
+  }, []);
+
+  const accessState = useMemo(() => getSubscriptionAccessState(user, nowMs), [user, nowMs]);
+  const isAccessLocked = !accessState.hasFullAccess;
+
+  // États de paiement pour la fenêtre Mon abonnement
+  const [subProcessingPlan, setSubProcessingPlan] = useState<'monthly' | 'quarterly' | null>(null);
+  const [subError, setSubError] = useState<string | null>(null);
 
   // Devise active de l'utilisateur (globale dans toute la plateforme)
   const activeCurrency: SupportedCurrency = user.currency || 'XOF';
@@ -131,11 +167,48 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
   };
 
-  // Préférence Notifications (activé par défaut, persisté)
+  // Préférence Notifications (activé par défaut, persisté) + vérification permission navigateur réelle
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('talambongo_notifications_enabled');
     return saved !== 'false';
   });
+  const [browserNotifPermission, setBrowserNotifPermission] =
+    useState<BrowserNotificationPermission>(() => getBrowserNotificationPermission());
+
+  // Re-synchroniser l'état d'autorisation si l'utilisateur le modifie dans son navigateur
+  useEffect(() => {
+    const syncPermission = () => {
+      setBrowserNotifPermission(getBrowserNotificationPermission());
+    };
+    window.addEventListener('focus', syncPermission);
+    document.addEventListener('visibilitychange', syncPermission);
+    return () => {
+      window.removeEventListener('focus', syncPermission);
+      document.removeEventListener('visibilitychange', syncPermission);
+    };
+  }, []);
+
+  // Installation PWA (message discret + rubrique Télécharger l'application)
+  const {
+    isInstallable,
+    isInstalled,
+    browserType,
+    isBannerDismissed,
+    dismissBanner,
+    install: triggerNativeInstall,
+  } = usePWAInstall();
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+
+  const handleInstallAction = async () => {
+    if (isInstallable) {
+      const accepted = await triggerNativeInstall();
+      if (!accepted) {
+        setIsInstallModalOpen(true);
+      }
+      return;
+    }
+    setIsInstallModalOpen(true);
+  };
 
   // Préférence Apparence Thème (clair par défaut, persisté)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -152,27 +225,62 @@ export const Dashboard: React.FC<DashboardProps> = ({
     localStorage.setItem('talambongo_theme', theme);
   }, [theme]);
 
-  // Bascule des notifications avec persistance
-  const handleToggleNotifications = () => {
+  // Bascule des notifications avec demande d'autorisation système réelle sur geste utilisateur
+  const handleToggleNotifications = async () => {
     const nextVal = !notificationsEnabled;
     setNotificationsEnabled(nextVal);
     localStorage.setItem('talambongo_notifications_enabled', String(nextVal));
+
+    if (nextVal && getBrowserNotificationPermission() === 'default') {
+      const result = await requestBrowserNotificationPermission();
+      setBrowserNotifPermission(result);
+    }
   };
 
-  // Navigation entre les onglets
+  const handleRequestBrowserPermission = async () => {
+    const result = await requestBrowserNotificationPermission();
+    setBrowserNotifPermission(result);
+  };
+
+  // Navigation entre les onglets (protégée par le contrôle d'accès Essai / Premium)
   const handleTabChange = (tab: 'home' | 'calendar' | 'bilan' | 'profile') => {
     setActiveTab(tab);
-    if (tab === 'calendar') {
+    if (tab === 'calendar' && canAccessFeature(accessState, 'calendar')) {
       // Lorsque l'utilisateur ouvre le Calendrier, afficher automatiquement le mois actuel
       const d = new Date();
       setCurrentMonthDate(new Date(d.getFullYear(), d.getMonth(), 1));
       setSelectedDay(d.getDate());
     }
-    if (tab === 'bilan') {
+    if (tab === 'bilan' && canAccessFeature(accessState, 'bilan')) {
       onReportViewed?.();
     }
     if (tab !== 'profile') {
       setIsSettingsOpen(false);
+    }
+  };
+
+  const handleSelectSubscriptionPlan = async (planType: 'monthly' | 'quarterly') => {
+    if (subProcessingPlan) return;
+    setSubError(null);
+    setSubProcessingPlan(planType);
+    try {
+      const idempotencyKey = `web_${planType}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const res = await onSubscribePlan(planType, idempotencyKey);
+      if (!res.activated || res.paymentStatus !== 'confirmed') {
+        setSubError(
+          'Paiement en attente ou non confirmé. Votre accès Premium sera activé dès confirmation.'
+        );
+        return;
+      }
+      setIsSubModalOpen(false);
+    } catch (err) {
+      setSubError(
+        err instanceof Error
+          ? err.message
+          : 'Impossible de confirmer le paiement pour le moment. Veuillez réessayer.'
+      );
+    } finally {
+      setSubProcessingPlan(null);
     }
   };
 
@@ -207,13 +315,53 @@ export const Dashboard: React.FC<DashboardProps> = ({
     return monthAll.length > 0 ? monthAll : expiringExpenses;
   }, [expiringExpenses, expenses]);
 
+  // Envoi d'une notification système réelle uniquement lorsqu'il existe de vraies dépenses approchant de l'expiration (aucune fausse notification)
+  useEffect(() => {
+    if (
+      !notificationsEnabled ||
+      browserNotifPermission !== 'granted' ||
+      expiringExpenses.length === 0 ||
+      !expiringPeriodName
+    ) {
+      return;
+    }
+
+    const storageKey = `talambongo_notified_expiring_${expiringPeriodName}`;
+    if (localStorage.getItem(storageKey) === '1') {
+      return;
+    }
+
+    sendBrowserNotification('TalaMbongo — Export de bilan recommandé', {
+      body: `${expiringExpenses.length} dépense${expiringExpenses.length > 1 ? 's' : ''} de ${expiringPeriodName} approchent de la limite du ${expiringDeadlineStr || '3 du mois'}.`,
+      tag: 'talambongo-history-expiry',
+    }).then((sent) => {
+      if (sent) {
+        localStorage.setItem(storageKey, '1');
+      }
+    });
+  }, [
+    notificationsEnabled,
+    browserNotifPermission,
+    expiringExpenses.length,
+    expiringPeriodName,
+    expiringDeadlineStr,
+  ]);
+
   const handleOpenNormalPdfExport = () => {
+    if (!canAccessFeature(accessState, 'pdf_export')) {
+      setIsSubModalOpen(true);
+      return;
+    }
     setPdfTarget('current_month');
     setIsPdfModalOpen(true);
     onPdfExported?.();
   };
 
   const handleOpenExpiringPdfExport = () => {
+    if (!canAccessFeature(accessState, 'pdf_export')) {
+      setIsSubModalOpen(true);
+      return;
+    }
     setPdfTarget('expiring');
     setIsPdfModalOpen(true);
     onPdfExported?.();
@@ -481,8 +629,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <h1 className="text-base sm:text-lg font-black text-gray-900 leading-tight">
                 Bonjour 👋
               </h1>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 font-bold hidden sm:inline-block">
-                {user.status}
+              <span
+                className={`text-xs px-2 py-0.5 rounded-full font-bold hidden sm:inline-block tabular-nums ${
+                  isAccessLocked
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-emerald-50 text-emerald-800'
+                }`}
+              >
+                {accessState.isPremiumActive
+                  ? 'Premium'
+                  : accessState.isTrialActive
+                  ? `Essai gratuit • ${accessState.trialDaysLeft} j`
+                  : 'Expiré'}
               </span>
             </div>
           </div>
@@ -533,8 +691,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {/* Main Content Area */}
       <main className="max-w-4xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8">
+        {/* Message discret pour installer l'application (masqué si installé ou fermé) */}
+        <DiscreteInstallBanner
+          visible={!isInstalled && !isBannerDismissed}
+          onInstall={handleInstallAction}
+          onDismiss={dismissBanner}
+        />
+
         {/* Avertissement avant expiration (respecte la préférence de notifications de l'utilisateur) */}
-        {notificationsEnabled && expiringExpenses.length > 0 && (
+        {!isAccessLocked && notificationsEnabled && expiringExpenses.length > 0 && (
           <div
             id="history-expiration-warning"
             className="mb-6 p-4 sm:p-5 rounded-2xl bg-amber-50/95 border border-amber-200/90 text-amber-950 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
@@ -565,8 +730,37 @@ export const Dashboard: React.FC<DashboardProps> = ({
         )}
 
         <AnimatePresence mode="wait">
+          {/* PAYWALL PREMIUM LORSQUE L'ESSAI OU L'ABONNEMENT A EXPIRÉ */}
+          {isAccessLocked && activeTab !== 'profile' && (
+            <motion.div
+              key="tab-paywall"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+            >
+              <PremiumPaywall
+                phase={
+                  accessState.phase === 'subscription_expired'
+                    ? 'subscription_expired'
+                    : 'trial_expired'
+                }
+                currency={activeCurrency}
+                expensesCount={expenses.length}
+                trialEndsAtMs={accessState.trialEndsAtMs}
+                subscriptionEndAtMs={accessState.subscriptionEndAtMs}
+                onUpgradeClick={() => {
+                  setSubError(null);
+                  setIsSubModalOpen(true);
+                }}
+                onOpenProfile={() => handleTabChange('profile')}
+                onLogout={onLogout}
+              />
+            </motion.div>
+          )}
+
           {/* TAB 1: ACCUEIL — DASHBOARD DE SYNTHÈSE DES DÉPENSES */}
-          {activeTab === 'home' && (
+          {!isAccessLocked && activeTab === 'home' && (
             <motion.div
               key="tab-home"
               initial={{ opacity: 0, y: 8 }}
@@ -575,6 +769,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
               transition={{ duration: 0.2 }}
               className="space-y-6"
             >
+              {/* Indication dynamique des jours restants d'essai gratuit */}
+              {accessState.isTrialActive && (
+                <div
+                  id="trial-remaining-banner"
+                  className="px-4 py-3 rounded-2xl bg-emerald-50 border border-emerald-100 flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="flex items-center gap-2 text-emerald-950 font-semibold tabular-nums">
+                    <Clock className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      Essai gratuit : il vous reste{' '}
+                      <strong className="font-black">
+                        {accessState.trialDaysLeft} jour{accessState.trialDaysLeft > 1 ? 's' : ''}
+                      </strong>{' '}
+                      (jusqu&apos;au{' '}
+                      {new Date(accessState.trialEndsAtMs).toLocaleDateString('fr-FR', {
+                        day: 'numeric',
+                        month: 'short',
+                      })}
+                      )
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSubError(null);
+                      setIsSubModalOpen(true);
+                    }}
+                    className="font-bold text-emerald-700 hover:text-emerald-800 cursor-pointer transition"
+                  >
+                    Passer à Premium →
+                  </button>
+                </div>
+              )}
+
               {/* Cadre principal : Dépenses du mois */}
               <div
                 id="home-month-overview-card"
@@ -814,7 +1042,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           )}
 
           {/* TAB 2: CALENDRIER — ESPACE DE RECHERCHE ET CONSULTATION PAR DATE */}
-          {activeTab === 'calendar' && (
+          {!isAccessLocked && activeTab === 'calendar' && (
             <motion.div
               key="tab-calendar"
               initial={{ opacity: 0, y: 8 }}
@@ -1028,7 +1256,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           )}
 
           {/* TAB 3: BILAN */}
-          {activeTab === 'bilan' && (
+          {!isAccessLocked && activeTab === 'bilan' && (
             <motion.div
               key="tab-bilan"
               initial={{ opacity: 0, y: 8 }}
@@ -1228,7 +1456,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </div>
 
                     {/* 2. 🔔 Notifications */}
-                    <div className="rounded-3xl bg-white border border-gray-100 p-5 sm:p-6 shadow-xs">
+                    <div className="rounded-3xl bg-white border border-gray-100 p-5 sm:p-6 shadow-xs space-y-3">
                       <div className="flex items-center justify-between gap-4">
                         <div className="space-y-1">
                           <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
@@ -1236,7 +1464,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             <span>Notifications</span>
                           </h3>
                           <p className="text-xs text-gray-500">
-                            Alertes et notifications liées à la suppression de l'historique le 3 de chaque mois
+                            Alertes et notifications liées à la suppression de l&apos;historique le 3 de chaque mois
                           </p>
                         </div>
 
@@ -1262,6 +1490,32 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             />
                           </button>
                         </div>
+                      </div>
+
+                      {/* Statut réel d'autorisation du navigateur */}
+                      <div className="pt-2 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="text-gray-500">
+                          {!notificationsEnabled
+                            ? 'Les rappels d\'expiration sont désactivés.'
+                            : browserNotifPermission === 'granted'
+                            ? 'Autorisation navigateur accordée (alertes dans l\'app et système actives).'
+                            : browserNotifPermission === 'denied'
+                            ? 'Notifications navigateur bloquées. Les alertes restent visibles dans l\'application (modifiable dans les réglages du navigateur).'
+                            : browserNotifPermission === 'default'
+                            ? 'Alertes actives dans l\'application. Autorise les notifications système pour recevoir les rappels.'
+                            : 'Alertes actives dans l\'application (notifications système non prises en charge sur ce navigateur).'}
+                        </span>
+                        {notificationsEnabled && browserNotifPermission === 'default' && (
+                          <button
+                            id="request-browser-notifications-btn"
+                            type="button"
+                            onClick={handleRequestBrowserPermission}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 font-bold text-xs transition cursor-pointer"
+                          >
+                            <Bell className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Autoriser sur cet appareil</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -1312,7 +1566,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           onClick={() => setTheme('dark')}
                           className={`p-4 rounded-2xl border text-left transition cursor-pointer flex items-center justify-between ${
                             theme === 'dark'
-                              ? 'border-emerald-500 bg-[#14211c] ring-2 ring-emerald-500 ring-offset-1'
+                              ? 'border-emerald-500 bg-[#192b24] ring-2 ring-emerald-500 ring-offset-1'
                               : 'border-gray-200 hover:border-gray-300 bg-white'
                           }`}
                         >
@@ -1321,8 +1575,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               🌙
                             </div>
                             <div>
-                              <p className="text-sm font-bold text-gray-900">Mode sombre</p>
-                              <p className="text-[11px] text-gray-500">Contraste soigné & vert nuit</p>
+                              <p className={`text-sm font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>Mode sombre</p>
+                              <p className={`text-[11px] ${theme === 'dark' ? 'text-emerald-200/80' : 'text-gray-500'}`}>Contraste soigné &amp; vert nuit</p>
                             </div>
                           </div>
                           {theme === 'dark' && (
@@ -1416,9 +1670,26 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
 
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[11px] font-bold">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
-                            <span>Statut : {user.status}</span>
+                          <div
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold tabular-nums ${
+                              isAccessLocked
+                                ? 'bg-amber-50 text-amber-800'
+                                : 'bg-emerald-50 text-emerald-800'
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                isAccessLocked ? 'bg-amber-600' : 'bg-emerald-600'
+                              }`}
+                            />
+                            <span>
+                              Statut :{' '}
+                              {accessState.isPremiumActive
+                                ? 'Premium'
+                                : accessState.isTrialActive
+                                ? `Essai gratuit (${accessState.trialDaysLeft} j restant${accessState.trialDaysLeft > 1 ? 's' : ''})`
+                                : 'Expiré'}
+                            </span>
                           </div>
                           <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[11px] font-bold">
                             <span>💱 {SUPPORTED_CURRENCIES[activeCurrency].code} ({SUPPORTED_CURRENCIES[activeCurrency].symbol})</span>
@@ -1436,7 +1707,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   {/* Actions List (Mon abonnement, Export PDF, Paramètres, Se déconnecter) */}
                   <div className="rounded-3xl bg-white border border-gray-100 shadow-xs divide-y divide-gray-100 overflow-hidden">
                     <button
-                      onClick={() => setIsSubModalOpen(true)}
+                      onClick={() => {
+                        setSubError(null);
+                        setIsSubModalOpen(true);
+                      }}
                       className="w-full p-4 sm:p-5 flex items-center justify-between hover:bg-gray-50 transition cursor-pointer text-left"
                     >
                       <div className="flex items-center gap-3">
@@ -1445,8 +1719,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         </div>
                         <div>
                           <h4 className="text-sm font-bold text-gray-900">Mon abonnement</h4>
-                          <p className="text-xs text-gray-500">
-                            {user.status === 'Essai gratuit' ? '7 jours gratuits en cours' : 'Abonnement actif'}
+                          <p className="text-xs text-gray-500 tabular-nums">
+                            {accessState.isTrialActive
+                              ? `Essai gratuit • ${accessState.trialDaysLeft} jour${accessState.trialDaysLeft > 1 ? 's' : ''} restant${accessState.trialDaysLeft > 1 ? 's' : ''}`
+                              : accessState.isPremiumActive
+                              ? `Abonnement Premium actif (${accessState.subscriptionDaysLeft} j restants)`
+                              : accessState.phase === 'subscription_expired'
+                              ? 'Abonnement expiré • Renouveler pour continuer'
+                              : 'Essai gratuit terminé • Passer à Premium'}
                           </p>
                         </div>
                       </div>
@@ -1463,7 +1743,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         </div>
                         <div>
                           <h4 className="text-sm font-bold text-gray-900">Export PDF</h4>
-                          <p className="text-xs text-gray-500">Télécharge tes bilans mensuels imprimables</p>
+                          <p className="text-xs text-gray-500">
+                            {isAccessLocked
+                              ? 'Abonnement Premium requis pour exporter en PDF'
+                              : 'Télécharge tes bilans mensuels imprimables'}
+                          </p>
                         </div>
                       </div>
                       <ChevronRight className="w-4 h-4 text-gray-400" />
@@ -1489,6 +1773,47 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </button>
 
                     <button
+                      id="profile-download-app-button"
+                      type="button"
+                      onClick={handleInstallAction}
+                      className="w-full p-4 sm:p-5 flex items-center justify-between hover:bg-gray-50 transition cursor-pointer text-left"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                          <Smartphone className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">Télécharger l&apos;application</h4>
+                          <p className="text-xs text-gray-500">
+                            Ajouter TalaMbongo à votre écran d&apos;accueil
+                          </p>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-gray-400" />
+                    </button>
+
+                    <a
+                      id="profile-support-whatsapp-link"
+                      href={`https://wa.me/242061152228?text=${encodeURIComponent('Bonjour, je souhaite obtenir de l\'aide concernant votre plateforme.')}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full p-4 sm:p-5 flex items-center justify-between hover:bg-gray-50 transition cursor-pointer text-left"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                          <MessageCircle className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">Service client / Support</h4>
+                          <p className="text-xs text-gray-500">
+                            Contacter le support sur WhatsApp (+242 06 115 22 28)
+                          </p>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-gray-400" />
+                    </a>
+
+                    <button
                       onClick={onLogout}
                       className="w-full p-4 sm:p-5 flex items-center justify-between hover:bg-rose-50/50 transition cursor-pointer text-left text-rose-600 group"
                     >
@@ -1498,20 +1823,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         </div>
                         <div>
                           <h4 className="text-sm font-bold">Se déconnecter</h4>
-                          <p className="text-xs text-rose-400">Retourner à la page d'accueil</p>
+                          <p className="text-xs text-rose-400">Retourner à la page d&apos;accueil</p>
                         </div>
                       </div>
                       <ChevronRight className="w-4 h-4 text-rose-400" />
                     </button>
-                  </div>
-
-                  {/* PWA Install helper inside profile */}
-                  <div className="p-5 rounded-3xl bg-[#fafbfc] border border-gray-100 flex items-center justify-between">
-                    <div>
-                      <h4 className="text-xs font-bold text-gray-800">Application PWA installable</h4>
-                      <p className="text-[11px] text-gray-500">Ajoute TalaMbongo à ton écran d'accueil</p>
-                    </div>
-                    <PWAInstallButton variant="compact" />
                   </div>
                 </>
               )}
@@ -1573,47 +1889,53 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
       </nav>
 
-      {/* Floating Action Button (FAB) "+" for easy thumb access on mobile */}
-      <button
-        id="floating-add-expense-thumb-btn"
-        onClick={() => setIsAddModalOpen(true)}
-        aria-label="Ajouter une dépense rapidement"
-        title="Ajouter une dépense"
-        className="fixed bottom-20 right-4 md:bottom-8 md:right-8 z-40 w-14 h-14 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white shadow-xl shadow-emerald-700/35 flex items-center justify-center transition-all active:scale-95 cursor-pointer"
-      >
-        <Plus className="w-6 h-6 stroke-[2.5]" />
-      </button>
+      {/* Floating Action Button (FAB) "+" for easy thumb access on mobile (uniquement si accès actif) */}
+      {!isAccessLocked && (
+        <button
+          id="floating-add-expense-thumb-btn"
+          onClick={() => setIsAddModalOpen(true)}
+          aria-label="Ajouter une dépense rapidement"
+          title="Ajouter une dépense"
+          className="fixed bottom-20 right-4 md:bottom-8 md:right-8 z-40 w-14 h-14 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white shadow-xl shadow-emerald-700/35 flex items-center justify-center transition-all active:scale-95 cursor-pointer"
+        >
+          <Plus className="w-6 h-6 stroke-[2.5]" />
+        </button>
+      )}
 
       {/* Add Expense Modal */}
-      <AddExpenseModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onAdd={onAddExpense}
-        defaultDate={selectedDateStr}
-        currency={activeCurrency}
-      />
+      {!isAccessLocked && (
+        <AddExpenseModal
+          isOpen={isAddModalOpen}
+          onClose={() => setIsAddModalOpen(false)}
+          onAdd={onAddExpense}
+          defaultDate={selectedDateStr}
+          currency={activeCurrency}
+        />
+      )}
 
       {/* PDF Export Modal */}
-      <PdfExportModal
-        isOpen={isPdfModalOpen}
-        onClose={() => setIsPdfModalOpen(false)}
-        expenses={pdfTarget === 'expiring' ? expiringPeriodExpenses : monthExpenses}
-        monthName={pdfTarget === 'expiring' ? expiringPeriodName : monthNameFormatted}
-        totalAmount={
-          pdfTarget === 'expiring'
-            ? expiringPeriodExpenses.reduce(
-                (acc, curr) => acc + convertAmount(curr.amount, curr.currency, activeCurrency),
-                0
-              )
-            : currentMonthTotal
-        }
-        currency={activeCurrency}
-        userName={user.name}
-        userCountry={user.country || 'Congo-Brazzaville'}
-        avgDaily={pdfTarget === 'expiring' ? undefined : bilanStats.avgDaily}
-        maxExpenseTitle={pdfTarget === 'expiring' ? undefined : bilanStats.maxExpenseTitle}
-        maxExpenseAmount={pdfTarget === 'expiring' ? undefined : bilanStats.maxExpenseAmount}
-      />
+      {!isAccessLocked && (
+        <PdfExportModal
+          isOpen={isPdfModalOpen}
+          onClose={() => setIsPdfModalOpen(false)}
+          expenses={pdfTarget === 'expiring' ? expiringPeriodExpenses : monthExpenses}
+          monthName={pdfTarget === 'expiring' ? expiringPeriodName : monthNameFormatted}
+          totalAmount={
+            pdfTarget === 'expiring'
+              ? expiringPeriodExpenses.reduce(
+                  (acc, curr) => acc + convertAmount(curr.amount, curr.currency, activeCurrency),
+                  0
+                )
+              : currentMonthTotal
+          }
+          currency={activeCurrency}
+          userName={user.name}
+          userCountry={user.country || 'Congo-Brazzaville'}
+          avgDaily={pdfTarget === 'expiring' ? undefined : bilanStats.avgDaily}
+          maxExpenseTitle={pdfTarget === 'expiring' ? undefined : bilanStats.maxExpenseTitle}
+          maxExpenseAmount={pdfTarget === 'expiring' ? undefined : bilanStats.maxExpenseAmount}
+        />
+      )}
 
       {/* Subscription Modal (Mon abonnement) */}
       {isSubModalOpen && (
@@ -1622,76 +1944,137 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <h3 className="text-lg font-bold text-gray-900">Mon abonnement</h3>
               <button
-                onClick={() => setIsSubModalOpen(false)}
-                className="p-1 rounded-lg text-gray-400 hover:text-gray-600"
+                onClick={() => !subProcessingPlan && setIsSubModalOpen(false)}
+                disabled={Boolean(subProcessingPlan)}
+                className="p-1 rounded-lg text-gray-400 hover:text-gray-600 disabled:opacity-50"
               >
                 ✕
               </button>
             </div>
 
-            <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 space-y-2">
+            <div
+              className={`p-4 rounded-2xl border space-y-2 ${
+                isAccessLocked
+                  ? 'bg-amber-50 border-amber-200'
+                  : 'bg-emerald-50 border-emerald-100'
+              }`}
+            >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
-                  Formule active
+                <span
+                  className={`text-xs font-bold uppercase tracking-wide ${
+                    isAccessLocked ? 'text-amber-800' : 'text-emerald-800'
+                  }`}
+                >
+                  {isAccessLocked ? 'Statut du compte' : 'Formule active'}
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded bg-emerald-200 text-emerald-900 font-bold">
-                  {user.status}
+                <span
+                  className={`text-xs px-2 py-0.5 rounded font-bold ${
+                    isAccessLocked
+                      ? 'bg-amber-100 text-amber-800'
+                      : 'bg-emerald-200 text-emerald-900'
+                  }`}
+                >
+                  {accessState.isPremiumActive
+                    ? 'Premium'
+                    : accessState.isTrialActive
+                    ? 'Essai gratuit'
+                    : 'Expiré'}
                 </span>
               </div>
-              <p className="text-sm font-bold text-gray-900">
-                {user.status === 'Essai gratuit' ? '7 jours gratuits (il reste 5 jours)' : 'TalaMbongo Premium (historique mensuel jusqu\'au 3)'}
+              <p className="text-sm font-bold text-gray-900 tabular-nums">
+                {accessState.isTrialActive
+                  ? `7 jours gratuits (il reste ${accessState.trialDaysLeft} jour${accessState.trialDaysLeft > 1 ? 's' : ''})`
+                  : accessState.isPremiumActive
+                  ? `TalaMbongo Premium (valide jusqu'au ${
+                      accessState.subscriptionEndAtMs
+                        ? new Date(accessState.subscriptionEndAtMs).toLocaleDateString('fr-FR', {
+                            day: 'numeric',
+                            month: 'long',
+                            year: 'numeric',
+                          })
+                        : '3 du mois'
+                    })`
+                  : accessState.phase === 'subscription_expired'
+                  ? 'Votre abonnement Premium a expiré'
+                  : 'Votre essai gratuit est terminé'}
               </p>
             </div>
 
+            {subError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+                {subError}
+              </div>
+            )}
+
             <div className="space-y-3 text-xs text-gray-600">
-              <p className="font-semibold text-gray-900">Passer à TalaMbongo Premium :</p>
-              <div className="p-3.5 rounded-xl border border-emerald-300 bg-white flex items-center justify-between">
+              <p className="font-semibold text-gray-900">
+                {accessState.isPremiumActive
+                  ? 'Renouveler ou prolonger TalaMbongo Premium :'
+                  : 'Passer à TalaMbongo Premium :'}
+              </p>
+              <div className="p-3.5 rounded-xl border border-emerald-300 bg-white flex items-center justify-between gap-3">
                 <div>
-                  <p className="font-bold text-gray-900">Option 1 mois</p>
-                  <p className="text-gray-500">{formatCurrency(subMonthlyPrice, activeCurrency)} / mois</p>
+                  <p className="font-bold text-gray-900">Option 1 mois (Par mois)</p>
+                  <p className="text-gray-500 tabular-nums">
+                    {formatCurrency(subMonthlyPrice, activeCurrency)} / mois
+                  </p>
                 </div>
                 <button
-                  onClick={() => {
-                    onUpdateUser({ status: 'Premium', subscriptionType: 'monthly', subscriptionStatus: 'active' });
-                    setIsSubModalOpen(false);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer"
+                  id="sub-choose-monthly-btn"
+                  type="button"
+                  disabled={Boolean(subProcessingPlan)}
+                  onClick={() => handleSelectSubscriptionPlan('monthly')}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-60 shrink-0"
                 >
-                  Choisir
+                  {subProcessingPlan === 'monthly' ? 'Activation...' : 'Choisir'}
                 </button>
               </div>
 
-              <div className="p-3.5 rounded-xl border border-emerald-300 bg-white flex items-center justify-between">
+              <div className="p-3.5 rounded-xl border border-emerald-300 bg-white flex items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-1.5">
                     <p className="font-bold text-gray-900">Option 3 mois</p>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded">
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded tabular-nums">
                       -{formatCurrency(subSavingsPrice, activeCurrency)}
                     </span>
                   </div>
-                  <p className="text-gray-500">{formatCurrency(subQuarterlyPrice, activeCurrency)} (soit {formatCurrency(subPerMonthQuarterly, activeCurrency)}/mois)</p>
+                  <p className="text-gray-500 tabular-nums">
+                    {formatCurrency(subQuarterlyPrice, activeCurrency)} (soit{' '}
+                    {formatCurrency(subPerMonthQuarterly, activeCurrency)}/mois)
+                  </p>
                 </div>
                 <button
-                  onClick={() => {
-                    onUpdateUser({ status: 'Premium', subscriptionType: 'quarterly', subscriptionStatus: 'active' });
-                    setIsSubModalOpen(false);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer"
+                  id="sub-choose-quarterly-btn"
+                  type="button"
+                  disabled={Boolean(subProcessingPlan)}
+                  onClick={() => handleSelectSubscriptionPlan('quarterly')}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition cursor-pointer disabled:opacity-60 shrink-0"
                 >
-                  Choisir
+                  {subProcessingPlan === 'quarterly' ? 'Activation...' : 'Choisir'}
                 </button>
               </div>
             </div>
 
             <button
+              type="button"
+              disabled={Boolean(subProcessingPlan)}
               onClick={() => setIsSubModalOpen(false)}
-              className="w-full py-2.5 rounded-xl bg-gray-100 text-gray-700 text-xs font-semibold hover:bg-gray-200 transition"
+              className="w-full py-2.5 rounded-xl bg-gray-100 text-gray-700 text-xs font-semibold hover:bg-gray-200 transition disabled:opacity-60 cursor-pointer"
             >
               Fermer
             </button>
           </div>
         </div>
       )}
+      {/* Install Guide Modal (partagé entre la bannière discrète et le Profil) */}
+      <InstallGuideModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
+        browserType={browserType}
+        isInstallable={isInstallable}
+        isInstalled={isInstalled}
+        onNativeInstall={triggerNativeInstall}
+      />
     </div>
   );
 };

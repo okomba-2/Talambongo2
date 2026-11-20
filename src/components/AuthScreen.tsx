@@ -1,5 +1,15 @@
-import React, { useState } from 'react';
-import { Eye, EyeOff, ArrowLeft, Mail, Lock, User, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Eye,
+  EyeOff,
+  ArrowLeft,
+  Mail,
+  Lock,
+  User,
+  CheckCircle2,
+  AlertCircle,
+  Tag,
+} from 'lucide-react';
 import { motion } from 'motion/react';
 import {
   createUserWithEmailAndPassword,
@@ -10,11 +20,24 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import { auth, browserPopupRedirectResolver, googleProvider } from '../firebase';
+import { validateReferralCode } from '../services/firebaseService';
+import { ReferralAttributionPayload } from '../types';
+import { normalizeReferralCode } from '../utils/partners';
 
 interface AuthScreenProps {
-  onSuccess: (user: { name: string; email: string }, mode: 'signup' | 'login') => void;
+  onSuccess: (
+    user: { name: string; email: string },
+    mode: 'signup' | 'login',
+    referralAttribution?: ReferralAttributionPayload | null
+  ) => void;
+  onAuthAttempt?: (intent: {
+    name?: string;
+    mode: 'signup' | 'login';
+    referralAttribution?: ReferralAttributionPayload | null;
+  }) => void;
   onBack: () => void;
   initialMode?: 'signup' | 'login';
+  lockedReferral?: ReferralAttributionPayload | null;
 }
 
 function getFriendlyFirebaseAuthError(err: unknown): string {
@@ -42,8 +65,12 @@ function getFriendlyFirebaseAuthError(err: unknown): string {
       return 'Trop de tentatives. Réessaie dans quelques instants.';
     case 'auth/popup-closed-by-user':
       return 'La fenêtre de connexion Google a été fermée avant la fin.';
+    case 'auth/cancelled-popup-request':
+      return 'Une autre fenêtre de connexion Google est déjà ouverte.';
     case 'auth/popup-blocked':
       return 'Ton navigateur a bloqué la fenêtre Google. Autorise les popups puis réessaie.';
+    case 'auth/account-exists-with-different-credential':
+      return 'Un compte existe déjà avec cette adresse e-mail via une autre méthode de connexion.';
     case 'auth/operation-not-allowed':
       return 'La connexion par e-mail/mot de passe n’est pas encore activée dans Firebase Console. Utilise « Continuer avec Google » ci-dessous ou active Email/Password dans Authentication > Sign-in method.';
     default:
@@ -53,17 +80,93 @@ function getFriendlyFirebaseAuthError(err: unknown): string {
 
 export const AuthScreen: React.FC<AuthScreenProps> = ({
   onSuccess,
+  onAuthAttempt,
   onBack,
   initialMode = 'signup',
+  lockedReferral = null,
 }) => {
   const [mode, setMode] = useState<'signup' | 'login' | 'forgot'>(initialMode);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [manualReferralCode, setManualReferralCode] = useState('');
+  const [referralCheckState, setReferralCheckState] = useState<{
+    status: 'idle' | 'checking' | 'valid' | 'invalid';
+    message?: string;
+    partnerId?: string;
+    code?: string;
+  }>({ status: 'idle' });
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (lockedReferral) {
+      setManualReferralCode(lockedReferral.code);
+      setReferralCheckState({
+        status: 'valid',
+        message: 'Code appliqué automatiquement via lien partenaire.',
+        partnerId: lockedReferral.partnerId,
+        code: lockedReferral.code,
+      });
+    }
+  }, [lockedReferral]);
+
+  const verifyManualReferralIfNeeded = async (): Promise<{
+    ok: boolean;
+    attribution: ReferralAttributionPayload | null;
+    error?: string;
+  }> => {
+    if (lockedReferral) {
+      // Re-valider côté serveur même si le lien est déjà verrouillé
+      const check = await validateReferralCode(lockedReferral.code);
+      if (check.valid && check.link) {
+        return {
+          ok: true,
+          attribution: {
+            partnerId: check.link.partnerId,
+            code: check.link.code,
+            source: 'link',
+            sessionId: lockedReferral.sessionId,
+          },
+        };
+      }
+      return {
+        ok: false,
+        attribution: null,
+        error: check.errorMessage || 'Le lien partenaire a expiré ou a été désactivé.',
+      };
+    }
+
+    const cleaned = normalizeReferralCode(manualReferralCode);
+    if (!cleaned) {
+      return { ok: true, attribution: null };
+    }
+
+    setReferralCheckState({ status: 'checking' });
+    const check = await validateReferralCode(cleaned);
+    if (!check.valid || !check.link) {
+      const msg = check.errorMessage || 'Code de parrainage invalide, désactivé ou expiré.';
+      setReferralCheckState({ status: 'invalid', message: msg });
+      return { ok: false, attribution: null, error: msg };
+    }
+
+    setReferralCheckState({
+      status: 'valid',
+      message: 'Code partenaire valide et actif.',
+      partnerId: check.link.partnerId,
+      code: check.link.code,
+    });
+    return {
+      ok: true,
+      attribution: {
+        partnerId: check.link.partnerId,
+        code: check.link.code,
+        source: 'manual',
+      },
+    };
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,8 +186,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       }
 
       if (mode === 'signup') {
-        const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+        const refResult = await verifyManualReferralIfNeeded();
+        if (!refResult.ok) {
+          setErrorMessage(refResult.error || 'Code de parrainage invalide ou expiré.');
+          setLoading(false);
+          return;
+        }
+
         const resolvedName = trimmedName || trimmedEmail.split('@')[0] || 'Utilisateur TalaMbongo';
+        onAuthAttempt?.({
+          name: resolvedName,
+          mode: 'signup',
+          referralAttribution: refResult.attribution,
+        });
+        const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
         if (cred.user) {
           await updateProfile(cred.user, { displayName: resolvedName });
         }
@@ -93,9 +208,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             name: resolvedName,
             email: cred.user.email || trimmedEmail,
           },
-          'signup'
+          'signup',
+          refResult.attribution
         );
       } else {
+        onAuthAttempt?.({ mode: 'login' });
         const cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
         const fallbackName = trimmedEmail.split('@')[0].replace('.', ' ');
         const resolvedName =
@@ -120,6 +237,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setLoading(true);
     setErrorMessage(null);
     setInfoMessage(null);
+    const intentMode = mode === 'signup' ? 'signup' : 'login';
+
+    let activeAttribution: ReferralAttributionPayload | null = lockedReferral || null;
+    if (mode === 'signup' || lockedReferral) {
+      const refResult = await verifyManualReferralIfNeeded();
+      if (!refResult.ok && mode === 'signup' && (manualReferralCode.trim() || lockedReferral)) {
+        setErrorMessage(refResult.error || 'Code de parrainage invalide ou expiré.');
+        setLoading(false);
+        return;
+      }
+      activeAttribution = refResult.attribution;
+    }
+
+    onAuthAttempt?.({ mode: intentMode, referralAttribution: activeAttribution });
     try {
       const cred = await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
       const userEmail = cred.user.email || '';
@@ -132,7 +263,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           name: userName,
           email: userEmail,
         },
-        mode === 'signup' ? 'signup' : 'login'
+        intentMode,
+        activeAttribution
       );
     } catch (err) {
       const code = (err as { code?: string })?.code || '';
@@ -142,7 +274,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         code === 'auth/operation-not-supported-in-this-environment'
       ) {
         try {
-          sessionStorage.setItem('talambongo_pending_auth_mode', mode === 'signup' ? 'signup' : 'login');
+          sessionStorage.setItem('talambongo_pending_auth_mode', intentMode);
+          if (activeAttribution) {
+            sessionStorage.setItem(
+              'talambongo_pending_manual_referral',
+              JSON.stringify(activeAttribution)
+            );
+          }
           await signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
           return;
         } catch (redirectErr) {
@@ -304,6 +442,78 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* 3b. Code de parrainage (uniquement à l'inscription) */}
+            {mode === 'signup' && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-xs font-semibold text-gray-700 block">
+                    Code de parrainage {lockedReferral ? '' : '(optionnel)'}
+                  </label>
+                  {lockedReferral && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[10px] font-bold text-emerald-700">
+                      <Lock className="w-3 h-3" />
+                      Appliqué automatiquement
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <Tag className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    id="auth-referral-input"
+                    type="text"
+                    readOnly={Boolean(lockedReferral)}
+                    value={lockedReferral ? lockedReferral.code : manualReferralCode}
+                    onChange={(e) => {
+                      if (lockedReferral) return;
+                      const nextVal = e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+                      setManualReferralCode(nextVal);
+                      if (referralCheckState.status !== 'idle') {
+                        setReferralCheckState({ status: 'idle' });
+                      }
+                    }}
+                    onBlur={() => {
+                      if (!lockedReferral && manualReferralCode.trim().length > 0) {
+                        void verifyManualReferralIfNeeded();
+                      }
+                    }}
+                    placeholder="Ex : PARTENAIRE10"
+                    maxLength={32}
+                    className={`w-full pl-10 pr-10 py-3 rounded-2xl border text-sm tracking-wide transition ${
+                      lockedReferral
+                        ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900 font-bold cursor-not-allowed select-none focus:outline-none'
+                        : 'bg-[#fafbfc] border-gray-200 text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-emerald-600 focus:bg-white uppercase'
+                    }`}
+                  />
+                  {lockedReferral && (
+                    <Lock className="w-4 h-4 text-emerald-600 absolute right-3.5 top-1/2 -translate-y-1/2" />
+                  )}
+                </div>
+
+                {lockedReferral ? (
+                  <p className="text-[11px] text-emerald-700 font-medium flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Code partenaire appliqué automatiquement via votre lien d'invitation (non modifiable).
+                    </span>
+                  </p>
+                ) : referralCheckState.status === 'checking' ? (
+                  <p className="text-[11px] text-gray-500 font-medium">
+                    Vérification du code de parrainage...
+                  </p>
+                ) : referralCheckState.status === 'valid' ? (
+                  <p className="text-[11px] text-emerald-700 font-medium flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>{referralCheckState.message}</span>
+                  </p>
+                ) : referralCheckState.status === 'invalid' ? (
+                  <p className="text-[11px] text-red-600 font-medium flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{referralCheckState.message}</span>
+                  </p>
+                ) : null}
               </div>
             )}
 

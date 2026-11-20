@@ -65,6 +65,24 @@ service cloud.firestore {
       return paymentStatus in ['confirmed', 'pending', 'failed', 'none'];
     }
 
+    function isValidReferralCode(code) {
+      return code is string && code.size() >= 3 && code.size() <= 32 && code.matches('^[A-Z0-9_\\-]+$');
+    }
+
+    function isValidPartnerStatus(status) {
+      return status in ['active', 'suspended', 'disabled'];
+    }
+
+    function isActivePartnerLinkAtNow(code, expectedPartnerId) {
+      return isValidReferralCode(code)
+        && isValidId(expectedPartnerId)
+        && exists(/databases/$(database)/documents/partner_links/$(code))
+        && get(/databases/$(database)/documents/partner_links/$(code)).data.status == 'active'
+        && get(/databases/$(database)/documents/partner_links/$(code)).data.partnerId == expectedPartnerId
+        && get(/databases/$(database)/documents/partner_links/$(code)).data.startDate <= request.time
+        && request.time <= get(/databases/$(database)/documents/partner_links/$(code)).data.endDate;
+    }
+
     // =========================================================
     // VALIDATION BLUEPRINTS (Anti-Update-Gap & Shadow Guard)
     // =========================================================
@@ -97,13 +115,23 @@ service cloud.firestore {
         'subscriptionType',
         'subscriptionStartAt',
         'subscriptionEndAt',
+        'subscriptionEndAtTs',
+        'lastConfirmedSubscriptionId',
         'trialDaysLeft',
+        'trialStartedAt',
+        'trialEndsAt',
+        'hasUsedFreeTrial',
         'mainGoal',
         'trackingFrequency',
         'onboardingCompleted',
         'expensesCount',
         'reportsViewedCount',
         'pdfExportsCount',
+        'referredByPartnerId',
+        'referredByCode',
+        'referralSource',
+        'referralSessionId',
+        'referralAttributedAt',
         'createdAt',
         'lastActiveAt',
         'updatedAt'
@@ -118,16 +146,59 @@ service cloud.firestore {
       && isValidSubType(data.subscriptionType)
       && (!('subscriptionStartAt' in data) || (data.subscriptionStartAt is string && data.subscriptionStartAt.size() <= 40))
       && (!('subscriptionEndAt' in data) || (data.subscriptionEndAt is string && data.subscriptionEndAt.size() <= 40))
+      && (!('subscriptionEndAtTs' in data) || data.subscriptionEndAtTs is timestamp)
+      && (!('lastConfirmedSubscriptionId' in data) || (data.lastConfirmedSubscriptionId is string && isValidId(data.lastConfirmedSubscriptionId)))
       && (!('trialDaysLeft' in data) || (data.trialDaysLeft is number && data.trialDaysLeft >= 0 && data.trialDaysLeft <= 365))
+      && (!('trialStartedAt' in data) || data.trialStartedAt is timestamp)
+      && (!('trialEndsAt' in data) || data.trialEndsAt is timestamp)
+      && (!('hasUsedFreeTrial' in data) || data.hasUsedFreeTrial is bool)
       && (!('mainGoal' in data) || (data.mainGoal is string && data.mainGoal.size() <= 150))
       && (!('trackingFrequency' in data) || (data.trackingFrequency is string && data.trackingFrequency.size() <= 80))
       && data.onboardingCompleted is bool
       && data.expensesCount is number && data.expensesCount >= 0
       && data.reportsViewedCount is number && data.reportsViewedCount >= 0
       && data.pdfExportsCount is number && data.pdfExportsCount >= 0
+      && (
+        (
+          !('referredByPartnerId' in data)
+          && !('referredByCode' in data)
+          && !('referralSource' in data)
+          && !('referralSessionId' in data)
+          && !('referralAttributedAt' in data)
+        ) || (
+          ('referredByPartnerId' in data) && data.referredByPartnerId is string && isValidId(data.referredByPartnerId)
+          && ('referredByCode' in data) && isValidReferralCode(data.referredByCode)
+          && ('referralSource' in data) && data.referralSource in ['link', 'manual']
+          && ('referralAttributedAt' in data) && data.referralAttributedAt is timestamp
+          && (!('referralSessionId' in data) || (data.referralSessionId is string && isValidId(data.referralSessionId)))
+        )
+      )
       && data.createdAt is timestamp
       && data.lastActiveAt is timestamp
       && data.updatedAt is timestamp;
+    }
+
+    function hasActiveUserAccess(userId) {
+      let userData = get(/databases/$(database)/documents/users/$(userId)).data;
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && (
+          userData.role == 'ADMIN'
+          || (
+            userData.subscriptionStatus in ['active', 'renewed']
+            && (
+              !('subscriptionEndAtTs' in userData)
+              || userData.subscriptionEndAtTs > request.time
+            )
+          )
+          || (
+            ('trialEndsAt' in userData)
+            && userData.trialEndsAt > request.time
+          )
+          || (
+            !('trialEndsAt' in userData)
+            && request.time < userData.createdAt + duration.value(7, 'd')
+          )
+        );
     }
 
     function isValidExpensePayload(data, expectedUid) {
@@ -192,6 +263,8 @@ service cloud.firestore {
         'amountXof',
         'startDate',
         'endDate',
+        'endAtTs',
+        'idempotencyKey',
         'createdAt',
         'updatedAt'
       ])
@@ -205,8 +278,24 @@ service cloud.firestore {
       && data.amountXof is number && data.amountXof >= 0
       && data.startDate is string && data.startDate.size() >= 1 && data.startDate.size() <= 40
       && data.endDate is string && data.endDate.size() >= 1 && data.endDate.size() <= 40
+      && (!('endAtTs' in data) || data.endAtTs is timestamp)
+      && (!('idempotencyKey' in data) || (data.idempotencyKey is string && isValidId(data.idempotencyKey)))
       && data.createdAt is timestamp
       && data.updatedAt is timestamp;
+    }
+
+    function isValidSubscriptionStateConsistency(data) {
+      return (
+        data.paymentStatus == 'confirmed'
+        && data.status in ['active', 'renewed']
+        && data.planType in ['monthly', 'quarterly']
+        && data.amountXof >= (data.planType == 'quarterly' ? 1180 : 490)
+        && ('endAtTs' in data) && data.endAtTs is timestamp
+        && data.endAtTs > request.time
+      ) || (
+        data.paymentStatus in ['pending', 'failed', 'none']
+        && !(data.status in ['active', 'renewed'])
+      );
     }
 
     function isValidAdminEntryPayload(data, expectedUid) {
@@ -251,6 +340,238 @@ service cloud.firestore {
       && (!('defaultAdminCurrency' in data) || isValidCurrency(data.defaultAdminCurrency));
     }
 
+    function isValidPartnerPayload(data, expectedPartnerId) {
+      return data.keys().hasAll([
+        'id',
+        'name',
+        'channelName',
+        'socialNetwork',
+        'contactInfo',
+        'code',
+        'referralLink',
+        'startDate',
+        'endDate',
+        'fixedAdFeeXof',
+        'commissionPerUserXof',
+        'commissionType',
+        'status',
+        'createdBy',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'name',
+        'channelName',
+        'socialNetwork',
+        'contactInfo',
+        'code',
+        'referralLink',
+        'startDate',
+        'endDate',
+        'fixedAdFeeXof',
+        'commissionPerUserXof',
+        'commissionType',
+        'status',
+        'notes',
+        'createdBy',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.id is string && data.id == expectedPartnerId && isValidId(data.id)
+      && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+      && data.channelName is string && data.channelName.size() >= 1 && data.channelName.size() <= 120
+      && data.socialNetwork is string && data.socialNetwork.size() >= 1 && data.socialNetwork.size() <= 60
+      && data.contactInfo is string && data.contactInfo.size() >= 1 && data.contactInfo.size() <= 200
+      && isValidReferralCode(data.code)
+      && data.referralLink is string && data.referralLink.size() >= 1 && data.referralLink.size() <= 300
+      && data.startDate is timestamp
+      && data.endDate is timestamp
+      && data.startDate <= data.endDate
+      && data.fixedAdFeeXof is number && data.fixedAdFeeXof >= 0
+      && data.commissionPerUserXof is number && data.commissionPerUserXof >= 0
+      && data.commissionType == 'first_payment_only'
+      && isValidPartnerStatus(data.status)
+      && (!('notes' in data) || (data.notes is string && data.notes.size() <= 500))
+      && data.createdBy is string && isValidId(data.createdBy)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPartnerLinkPayload(data, expectedCode) {
+      return data.keys().hasAll([
+        'code',
+        'partnerId',
+        'status',
+        'startDate',
+        'endDate',
+        'commissionPerUserXof',
+        'commissionType',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'code',
+        'partnerId',
+        'status',
+        'startDate',
+        'endDate',
+        'commissionPerUserXof',
+        'commissionType',
+        'updatedAt'
+      ])
+      && isValidReferralCode(data.code) && data.code == expectedCode
+      && data.partnerId is string && isValidId(data.partnerId)
+      && isValidPartnerStatus(data.status)
+      && data.startDate is timestamp
+      && data.endDate is timestamp
+      && data.startDate <= data.endDate
+      && data.commissionPerUserXof is number && data.commissionPerUserXof >= 0
+      && data.commissionType == 'first_payment_only'
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPartnerClickPayload(data, expectedClickId) {
+      return data.keys().hasAll([
+        'id',
+        'partnerId',
+        'code',
+        'sessionToken',
+        'landingPath',
+        'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'partnerId',
+        'code',
+        'sessionToken',
+        'landingPath',
+        'createdAt'
+      ])
+      && data.id is string && data.id == expectedClickId && isValidId(data.id)
+      && data.partnerId is string && isValidId(data.partnerId)
+      && isValidReferralCode(data.code)
+      && data.sessionToken is string && data.sessionToken.size() >= 1 && data.sessionToken.size() <= 128
+      && data.landingPath is string && data.landingPath.size() >= 1 && data.landingPath.size() <= 200
+      && data.createdAt is timestamp;
+    }
+
+    function isValidReferralSessionPayload(data, expectedSessionId) {
+      return data.keys().hasAll([
+        'id',
+        'partnerId',
+        'code',
+        'clickId',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'partnerId',
+        'code',
+        'clickId',
+        'status',
+        'usedByUid',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.id is string && data.id == expectedSessionId && isValidId(data.id)
+      && data.partnerId is string && isValidId(data.partnerId)
+      && isValidReferralCode(data.code)
+      && data.clickId is string && isValidId(data.clickId)
+      && data.status in ['pending', 'consumed']
+      && (!('usedByUid' in data) || (data.usedByUid is string && isValidId(data.usedByUid)))
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPartnerCommissionPayload(data, expectedCommissionId) {
+      return data.keys().hasAll([
+        'id',
+        'partnerId',
+        'referralCode',
+        'userId',
+        'anonymizedUserRef',
+        'subscriptionId',
+        'planType',
+        'paymentAmountXof',
+        'amountXof',
+        'commissionType',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'partnerId',
+        'referralCode',
+        'userId',
+        'anonymizedUserRef',
+        'subscriptionId',
+        'planType',
+        'paymentAmountXof',
+        'amountXof',
+        'commissionType',
+        'status',
+        'paidAt',
+        'payoutReference',
+        'payoutNote',
+        'paidByAdminUid',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.id is string && data.id == expectedCommissionId && isValidId(data.id)
+      && data.partnerId is string && isValidId(data.partnerId)
+      && isValidReferralCode(data.referralCode)
+      && data.userId is string && isValidId(data.userId)
+      && data.anonymizedUserRef is string && data.anonymizedUserRef.size() >= 4 && data.anonymizedUserRef.size() <= 40
+      && data.subscriptionId is string && isValidId(data.subscriptionId)
+      && data.planType in ['monthly', 'quarterly']
+      && data.paymentAmountXof is number && data.paymentAmountXof > 0
+      && data.amountXof is number && data.amountXof >= 0
+      && data.commissionType == 'first_payment_only'
+      && data.status in ['pending', 'paid']
+      && (!('paidAt' in data) || data.paidAt is timestamp)
+      && (!('payoutReference' in data) || (data.payoutReference is string && data.payoutReference.size() >= 1 && data.payoutReference.size() <= 120))
+      && (!('payoutNote' in data) || (data.payoutNote is string && data.payoutNote.size() <= 300))
+      && (!('paidByAdminUid' in data) || (data.paidByAdminUid is string && isValidId(data.paidByAdminUid)))
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidPartnerAuditLogPayload(data, expectedLogId) {
+      return data.keys().hasAll([
+        'id',
+        'action',
+        'partnerId',
+        'partnerName',
+        'partnerCode',
+        'actorUid',
+        'details',
+        'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'action',
+        'partnerId',
+        'partnerName',
+        'partnerCode',
+        'actorUid',
+        'details',
+        'amountXof',
+        'createdAt'
+      ])
+      && data.id is string && data.id == expectedLogId && isValidId(data.id)
+      && data.action in ['partner_created', 'partner_updated', 'partner_status_changed', 'commission_paid']
+      && data.partnerId is string && isValidId(data.partnerId)
+      && data.partnerName is string && data.partnerName.size() >= 1 && data.partnerName.size() <= 120
+      && isValidReferralCode(data.partnerCode)
+      && data.actorUid is string && isValidId(data.actorUid)
+      && data.details is string && data.details.size() >= 1 && data.details.size() <= 300
+      && (!('amountXof' in data) || (data.amountXof is number && data.amountXof >= 0))
+      && data.createdAt is timestamp;
+    }
+
     // =========================================================
     // COLLECTION RULES
     // =========================================================
@@ -264,9 +585,28 @@ service cloud.firestore {
         && isValidId(userId)
         && isValidUserPayload(incoming(), userId)
         && (
-          (isOwner(userId) && incoming().role == 'USER') ||
+          (isOwner(userId) && incoming().role == 'USER'
+            && incoming().subscriptionStatus == 'trial'
+            && incoming().subscriptionType == 'free_trial'
+            && !('subscriptionStartAt' in incoming())
+            && !('subscriptionEndAt' in incoming())
+            && !('subscriptionEndAtTs' in incoming())
+            && !('lastConfirmedSubscriptionId' in incoming())
+          ) ||
           (isOwner(userId) && incoming().role == 'ADMIN' && isAdmin()) ||
           isAdmin()
+        )
+        && incoming().hasUsedFreeTrial == true
+        && incoming().trialStartedAt == request.time
+        && incoming().trialEndsAt is timestamp
+        && incoming().trialEndsAt >= request.time + duration.value(6, 'd') + duration.value(23, 'h')
+        && incoming().trialEndsAt <= request.time + duration.value(7, 'd') + duration.value(1, 'm')
+        && (
+          !('referredByCode' in incoming()) ||
+          (
+            incoming().referralAttributedAt == request.time
+            && isActivePartnerLinkAtNow(incoming().referredByCode, incoming().referredByPartnerId)
+          )
         )
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -278,34 +618,101 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
+          !('referredByPartnerId' in existing())
+          || (
+            ('referredByPartnerId' in incoming())
+            && incoming().referredByPartnerId == existing().referredByPartnerId
+            && incoming().referredByCode == existing().referredByCode
+            && incoming().referralSource == existing().referralSource
+            && incoming().referralAttributedAt == existing().referralAttributedAt
+          )
+        )
+        && (
           isAdmin() ||
           (
             isOwner(userId)
             && incoming().role == existing().role
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'name',
-              'country',
-              'currency',
-              'mainGoal',
-              'trackingFrequency',
-              'onboardingCompleted',
-              'subscriptionStatus',
-              'subscriptionType',
-              'subscriptionStartAt',
-              'subscriptionEndAt',
-              'trialDaysLeft',
-              'expensesCount',
-              'reportsViewedCount',
-              'pdfExportsCount',
-              'lastActiveAt',
-              'updatedAt'
-            ])
+            && (
+              !('trialEndsAt' in existing())
+              || (
+                incoming().trialStartedAt == existing().trialStartedAt
+                && incoming().trialEndsAt == existing().trialEndsAt
+                && incoming().hasUsedFreeTrial == existing().hasUsedFreeTrial
+              )
+            )
+            && (
+              !('trialStartedAt' in incoming().diff(existing()).affectedKeys())
+              || (
+                !('trialEndsAt' in existing())
+                && incoming().hasUsedFreeTrial == true
+                && incoming().trialStartedAt == existing().createdAt
+                && incoming().trialEndsAt >= existing().createdAt + duration.value(6, 'd') + duration.value(23, 'h')
+                && incoming().trialEndsAt <= existing().createdAt + duration.value(7, 'd') + duration.value(1, 'm')
+              )
+            )
+            && (
+              // Branche 1 : Mise à jour profil / télémétrie / expiration sans auto-activation Premium
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'name',
+                  'country',
+                  'currency',
+                  'mainGoal',
+                  'trackingFrequency',
+                  'onboardingCompleted',
+                  'subscriptionStatus',
+                  'trialDaysLeft',
+                  'trialStartedAt',
+                  'trialEndsAt',
+                  'hasUsedFreeTrial',
+                  'expensesCount',
+                  'reportsViewedCount',
+                  'pdfExportsCount',
+                  'lastActiveAt',
+                  'updatedAt'
+                ])
+                && (
+                  !('subscriptionStatus' in incoming().diff(existing()).affectedKeys())
+                  || (
+                    incoming().subscriptionStatus == 'expired'
+                    && incoming().trialDaysLeft == 0
+                  )
+                )
+              )
+              ||
+              // Branche 2 : Activation ou renouvellement Premium strictement adossé à un paiement confirmé
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'subscriptionStatus',
+                  'subscriptionType',
+                  'subscriptionStartAt',
+                  'subscriptionEndAt',
+                  'subscriptionEndAtTs',
+                  'lastConfirmedSubscriptionId',
+                  'trialDaysLeft',
+                  'lastActiveAt',
+                  'updatedAt'
+                ])
+                && incoming().subscriptionStatus in ['active', 'renewed']
+                && incoming().subscriptionType in ['monthly', 'quarterly']
+                && ('lastConfirmedSubscriptionId' in incoming())
+                && isValidId(incoming().lastConfirmedSubscriptionId)
+                && existsAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId))
+                && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.userId == userId
+                && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.paymentStatus == 'confirmed'
+                && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.status == incoming().subscriptionStatus
+                && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.planType == incoming().subscriptionType
+                && incoming().subscriptionStartAt == getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.startDate
+                && incoming().subscriptionEndAt == getAfter(/databases/$(database)/documents/subscriptions/$(incoming().lastConfirmedSubscriptionId)).data.endDate
+              )
+            )
           )
         );
 
       allow delete: if isValidId(userId) && isAdmin();
 
       // 2. Personal Expenses Subcollection (STRICTLY owner-only; hidden even from Admin)
+      // Reads preserved forever; creating/deleting expenses blocked server-side when trial/subscription expired
       match /expenses/{expenseId} {
         allow get: if isValidId(userId) && isValidId(expenseId) && isOwner(userId);
         allow list: if isValidId(userId) && isOwner(userId);
@@ -313,19 +720,22 @@ service cloud.firestore {
           && isValidId(userId)
           && isValidId(expenseId)
           && isOwner(userId)
+          && hasActiveUserAccess(userId)
           && isValidExpensePayload(incoming(), userId)
           && incoming().createdAt == request.time;
         allow update: if isSignedIn()
           && isValidId(userId)
           && isValidId(expenseId)
           && isOwner(userId)
+          && hasActiveUserAccess(userId)
           && isValidExpensePayload(incoming(), userId)
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt;
         allow delete: if isSignedIn()
           && isValidId(userId)
           && isValidId(expenseId)
-          && isOwner(userId);
+          && isOwner(userId)
+          && hasActiveUserAccess(userId);
       }
     }
 
@@ -337,6 +747,7 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && isValidId(subscriptionId)
         && isValidSubscriptionPayload(incoming())
+        && isValidSubscriptionStateConsistency(incoming())
         && (incoming().userId == request.auth.uid || isAdmin())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
@@ -344,6 +755,7 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidId(subscriptionId)
         && isValidSubscriptionPayload(incoming())
+        && isValidSubscriptionStateConsistency(incoming())
         && incoming().userId == existing().userId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
@@ -351,10 +763,12 @@ service cloud.firestore {
           isAdmin() ||
           (
             existing().userId == request.auth.uid
+            && existing().paymentStatus == 'pending'
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'status',
               'paymentStatus',
               'endDate',
+              'endAtTs',
               'updatedAt'
             ])
           )
@@ -378,6 +792,142 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow create, update: if isValidId(statId) && isAdmin() && isValidAdminStatsPayload(incoming()) && incoming().updatedAt == request.time;
       allow delete: if isValidId(statId) && isAdmin();
+    }
+
+    // 6. Partners Registry (Admin-only PII & contracts)
+    match /partners/{partnerId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(partnerId)
+        && isAdmin()
+        && isValidPartnerPayload(incoming(), partnerId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(partnerId)
+        && isAdmin()
+        && isValidPartnerPayload(incoming(), partnerId)
+        && incoming().id == existing().id
+        && incoming().code == existing().code
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 7. Public Zero-PII Partner Code Lookup (get only, no enumeration)
+    match /partner_links/{code} {
+      allow get: if isValidReferralCode(code);
+      allow list: if isAdmin();
+      allow create: if isValidReferralCode(code)
+        && isAdmin()
+        && isValidPartnerLinkPayload(incoming(), code)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidReferralCode(code)
+        && isAdmin()
+        && isValidPartnerLinkPayload(incoming(), code)
+        && incoming().code == existing().code
+        && incoming().partnerId == existing().partnerId
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 8. Referral Clicks (Server-verified against active non-expired partner link)
+    match /partner_clicks/{clickId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(clickId)
+        && isValidPartnerClickPayload(incoming(), clickId)
+        && incoming().createdAt == request.time
+        && isActivePartnerLinkAtNow(incoming().code, incoming().partnerId);
+      allow update, delete: if false;
+    }
+
+    // 9. Referral Attribution Sessions (Stored in DB across signup flow)
+    match /referral_sessions/{sessionId} {
+      allow get: if isValidId(sessionId);
+      allow list: if isAdmin();
+      allow create: if isValidId(sessionId)
+        && isValidReferralSessionPayload(incoming(), sessionId)
+        && incoming().status == 'pending'
+        && !('usedByUid' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isActivePartnerLinkAtNow(incoming().code, incoming().partnerId);
+      allow update: if isSignedIn()
+        && isValidId(sessionId)
+        && isValidReferralSessionPayload(incoming(), sessionId)
+        && existing().status == 'pending'
+        && incoming().status == 'consumed'
+        && ('usedByUid' in incoming())
+        && incoming().usedByUid == request.auth.uid
+        && incoming().id == existing().id
+        && incoming().partnerId == existing().partnerId
+        && incoming().code == existing().code
+        && incoming().clickId == existing().clickId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 10. Partner Commissions (1 doc per referred userId, created atomically on first confirmed payment)
+    match /partner_commissions/{commissionId} {
+      allow get: if isValidId(commissionId) && (isAdmin() || isOwner(commissionId));
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(commissionId)
+        && isValidPartnerCommissionPayload(incoming(), commissionId)
+        && commissionId == incoming().userId
+        && (isOwner(incoming().userId) || isAdmin())
+        && incoming().status == 'pending'
+        && !('paidAt' in incoming())
+        && !('payoutReference' in incoming())
+        && !('payoutNote' in incoming())
+        && !('paidByAdminUid' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/users/$(incoming().userId))
+        && ('referredByPartnerId' in get(/databases/$(database)/documents/users/$(incoming().userId)).data)
+        && get(/databases/$(database)/documents/users/$(incoming().userId)).data.referredByPartnerId == incoming().partnerId
+        && get(/databases/$(database)/documents/users/$(incoming().userId)).data.referredByCode == incoming().referralCode
+        && existsAfter(/databases/$(database)/documents/subscriptions/$(incoming().subscriptionId))
+        && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().subscriptionId)).data.userId == incoming().userId
+        && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().subscriptionId)).data.paymentStatus == 'confirmed'
+        && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().subscriptionId)).data.status in ['active', 'renewed']
+        && getAfter(/databases/$(database)/documents/subscriptions/$(incoming().subscriptionId)).data.planType in ['monthly', 'quarterly']
+        && exists(/databases/$(database)/documents/partner_links/$(incoming().referralCode))
+        && incoming().amountXof == get(/databases/$(database)/documents/partner_links/$(incoming().referralCode)).data.commissionPerUserXof;
+      allow update: if isAdmin()
+        && isValidId(commissionId)
+        && isValidPartnerCommissionPayload(incoming(), commissionId)
+        && existing().status == 'pending'
+        && incoming().status == 'paid'
+        && ('paidAt' in incoming())
+        && ('payoutReference' in incoming())
+        && ('paidByAdminUid' in incoming())
+        && incoming().paidByAdminUid == request.auth.uid
+        && incoming().id == existing().id
+        && incoming().partnerId == existing().partnerId
+        && incoming().referralCode == existing().referralCode
+        && incoming().userId == existing().userId
+        && incoming().anonymizedUserRef == existing().anonymizedUserRef
+        && incoming().subscriptionId == existing().subscriptionId
+        && incoming().planType == existing().planType
+        && incoming().paymentAmountXof == existing().paymentAmountXof
+        && incoming().amountXof == existing().amountXof
+        && incoming().commissionType == existing().commissionType
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 11. Immutable Audit Trail for Partner Operations
+    match /partner_audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(logId)
+        && isValidPartnerAuditLogPayload(incoming(), logId)
+        && incoming().actorUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
     }
   }
 }

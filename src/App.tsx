@@ -18,13 +18,17 @@ import { auth, browserPopupRedirectResolver } from './firebase';
 import {
   deleteExpenseFromFirestore,
   ensureAdminRegistryEntry,
+  getReferralSessionFromFirestore,
   incrementUserActivityCounter,
   loadUserExpensesFromFirestore,
+  recordPartnerClickAndSession,
+  RecordedSubscriptionResult,
   recordSubscriptionInFirestore,
   resolveUserRole,
   syncExpenseToFirestore,
   syncUserAccountOnAuth,
   updateUserAccountDoc,
+  validateReferralCode,
   VerifiedRoleResolution,
 } from './services/firebaseService';
 import { Navbar } from './components/Navbar';
@@ -41,10 +45,61 @@ import { Onboarding } from './components/Onboarding';
 import { Dashboard } from './components/Dashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { Expense, UserProfile } from './types';
+import {
+  Expense,
+  ReferralAttributionPayload,
+  SupportedCurrency,
+  UserProfile,
+} from './types';
 import { INITIAL_EXPENSES, INITIAL_USER } from './data/initialData';
-import { convertAmount } from './utils/currency';
+import { convertAmount, getCurrencyForCountry } from './utils/currency';
 import { pruneExpiredExpenses } from './utils/historyRetention';
+import { normalizeReferralCode } from './utils/partners';
+import { canAccessFeature, getSubscriptionAccessState } from './utils/subscription';
+
+const REFERRAL_STORAGE_KEY = 'talambongo_pending_referral';
+
+function readStoredReferral(): ReferralAttributionPayload | null {
+  try {
+    const raw =
+      sessionStorage.getItem(REFERRAL_STORAGE_KEY) ||
+      localStorage.getItem(REFERRAL_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ReferralAttributionPayload>;
+    if (parsed && typeof parsed.code === 'string' && typeof parsed.partnerId === 'string') {
+      return {
+        code: parsed.code,
+        partnerId: parsed.partnerId,
+        source: parsed.source === 'manual' ? 'manual' : 'link',
+        sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : undefined,
+      };
+    }
+  } catch {
+    // Ignorer un JSON invalide
+  }
+  return null;
+}
+
+function persistPendingReferral(payload: ReferralAttributionPayload | null): void {
+  try {
+    if (!payload) {
+      sessionStorage.removeItem(REFERRAL_STORAGE_KEY);
+      localStorage.removeItem(REFERRAL_STORAGE_KEY);
+      return;
+    }
+    const serialized = JSON.stringify(payload);
+    sessionStorage.setItem(REFERRAL_STORAGE_KEY, serialized);
+    localStorage.setItem(REFERRAL_STORAGE_KEY, serialized);
+  } catch {
+    // Stockage navigateur indisponible
+  }
+}
+
+function needsMandatoryOnboarding(profile: Pick<UserProfile, 'role' | 'onboardingCompleted' | 'country'>): boolean {
+  if (profile.role === 'ADMIN') return false;
+  const country = (profile.country || '').trim();
+  return profile.onboardingCompleted !== true || country.length === 0 || country === 'Non sélectionné';
+}
 
 type AppView = 'landing' | 'auth' | 'onboarding' | 'app' | 'admin';
 
@@ -56,10 +111,115 @@ export default function App() {
   const [roleResolution, setRoleResolution] = useState<VerifiedRoleResolution | null>(null);
 
   const [authInitialMode, setAuthInitialMode] = useState<'signup' | 'login'>('signup');
+  const [activeReferral, setActiveReferral] = useState<ReferralAttributionPayload | null>(() =>
+    readStoredReferral()
+  );
 
-  // Stocke temporairement le nom saisi et l'intention (signup/login) lors d'une connexion via AuthScreen
-  const pendingAuthRef = useRef<{ name?: string; mode?: 'signup' | 'login' } | null>(null);
+  // Stocke temporairement le nom saisi, l'intention et l'attribution partenaire lors d'une connexion via AuthScreen
+  const pendingAuthRef = useRef<{
+    name?: string;
+    mode?: 'signup' | 'login';
+    referralAttribution?: ReferralAttributionPayload | null;
+  } | null>(null);
+  const activeReferralRef = useRef<ReferralAttributionPayload | null>(activeReferral);
   const lastResolvedUidRef = useRef<string | null>(null);
+  const syncingUidRef = useRef<string | null>(null);
+  const latestUserRef = useRef<UserProfile>(INITIAL_USER);
+
+  useEffect(() => {
+    activeReferralRef.current = activeReferral;
+  }, [activeReferral]);
+
+  // Capture du lien de parrainage (?ref=CODEPARTENAIRE), validation Firestore et enregistrement du clic/session en base
+  useEffect(() => {
+    let isMounted = true;
+
+    const captureOrRestoreReferral = async () => {
+      try {
+        const searchParams = new URLSearchParams(window.location.search);
+        const rawRef = searchParams.get('ref');
+
+        if (rawRef) {
+          const normalized = normalizeReferralCode(rawRef);
+          const check = await validateReferralCode(normalized);
+          if (!isMounted) return;
+
+          if (!check.valid || !check.link) {
+            // Ne jamais appliquer un code inexistant, suspendu, désactivé ou expiré
+            persistPendingReferral(null);
+            setActiveReferral(null);
+            return;
+          }
+
+          const existingStored = readStoredReferral();
+          if (
+            existingStored &&
+            existingStored.code === check.link.code &&
+            existingStored.sessionId
+          ) {
+            const sessionDoc = await getReferralSessionFromFirestore(existingStored.sessionId);
+            if (!isMounted) return;
+            if (sessionDoc && sessionDoc.status === 'pending') {
+              setActiveReferral(existingStored);
+              return;
+            }
+          }
+
+          const sessionToken =
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+          const { sessionId } = await recordPartnerClickAndSession(
+            check.link,
+            sessionToken,
+            window.location.pathname || '/'
+          );
+          if (!isMounted) return;
+
+          const attribution: ReferralAttributionPayload = {
+            partnerId: check.link.partnerId,
+            code: check.link.code,
+            source: 'link',
+            sessionId,
+          };
+          persistPendingReferral(attribution);
+          setActiveReferral(attribution);
+          return;
+        }
+
+        // Sans ?ref=, restaurer une éventuelle session d'attribution toujours en attente et valide
+        const stored = readStoredReferral();
+        if (stored) {
+          if (stored.sessionId) {
+            const sessionDoc = await getReferralSessionFromFirestore(stored.sessionId);
+            if (!isMounted) return;
+            if (!sessionDoc || sessionDoc.status !== 'pending') {
+              persistPendingReferral(null);
+              setActiveReferral(null);
+              return;
+            }
+          }
+          const check = await validateReferralCode(stored.code);
+          if (!isMounted) return;
+          if (check.valid && check.link) {
+            setActiveReferral(stored);
+          } else {
+            persistPendingReferral(null);
+            setActiveReferral(null);
+          }
+        }
+      } catch (err) {
+        console.error('Erreur capture lien parrainage:', err);
+      }
+    };
+
+    captureOrRestoreReferral();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Persistent User profile
   const [user, setUser] = useState<UserProfile>(() => {
@@ -115,12 +275,23 @@ export default function App() {
           | 'signup'
           | 'login'
           | null;
+        const pendingManualRefRaw = sessionStorage.getItem('talambongo_pending_manual_referral');
         if (redirectCred?.user && pendingRedirectMode) {
+          let parsedRedirectReferral: ReferralAttributionPayload | null = activeReferralRef.current;
+          if (pendingManualRefRaw) {
+            try {
+              parsedRedirectReferral = JSON.parse(pendingManualRefRaw) as ReferralAttributionPayload;
+            } catch {
+              // Ignorer
+            }
+          }
           pendingAuthRef.current = {
             name: redirectCred.user.displayName || undefined,
             mode: pendingRedirectMode,
+            referralAttribution: parsedRedirectReferral,
           };
           sessionStorage.removeItem('talambongo_pending_auth_mode');
+          sessionStorage.removeItem('talambongo_pending_manual_referral');
         }
 
         // Attendre que la persistance locale Firebase Auth soit complètement restaurée
@@ -136,6 +307,7 @@ export default function App() {
 
         if (!fbUser) {
           lastResolvedUidRef.current = null;
+          syncingUidRef.current = null;
           setFirebaseUser(null);
           setRoleResolution(null);
           localStorage.removeItem('talambongo_auth_active');
@@ -146,39 +318,54 @@ export default function App() {
 
         try {
           setFirebaseUser(fbUser);
-          const resolved = await resolveUserRole(fbUser);
-          if (!isMounted) return;
-          setRoleResolution(resolved);
-
           const isNewSessionResolution = lastResolvedUidRef.current !== fbUser.uid;
-          lastResolvedUidRef.current = fbUser.uid;
+          const pending = pendingAuthRef.current;
 
-          if (resolved.role === 'ADMIN') {
-            await ensureAdminRegistryEntry(fbUser);
-            const pending = pendingAuthRef.current;
-            const syncedProfile = await syncUserAccountOnAuth(
-              fbUser,
-              'ADMIN',
-              pending?.name,
-              pending?.mode
-            );
-            pendingAuthRef.current = null;
+          if (isNewSessionResolution || pending) {
+            if (syncingUidRef.current === fbUser.uid && !pending) {
+              return;
+            }
+            syncingUidRef.current = fbUser.uid;
+            const resolved = await resolveUserRole(fbUser);
             if (!isMounted) return;
-            setUser(syncedProfile);
-            localStorage.setItem('talambongo_auth_active', 'true');
-            document.documentElement.classList.remove('dark');
-            setView('admin');
-          } else {
-            const pending = pendingAuthRef.current;
-            if (isNewSessionResolution || pending) {
+            setRoleResolution(resolved);
+            lastResolvedUidRef.current = fbUser.uid;
+
+            const attributionToApply =
+              pending?.referralAttribution !== undefined
+                ? pending.referralAttribution
+                : activeReferralRef.current;
+
+            if (resolved.role === 'ADMIN') {
+              await ensureAdminRegistryEntry(fbUser);
               const syncedProfile = await syncUserAccountOnAuth(
                 fbUser,
-                'USER',
+                'ADMIN',
                 pending?.name,
                 pending?.mode
               );
               pendingAuthRef.current = null;
+              syncingUidRef.current = null;
               if (!isMounted) return;
+              latestUserRef.current = syncedProfile;
+              setUser(syncedProfile);
+              localStorage.setItem('talambongo_auth_active', 'true');
+              document.documentElement.classList.remove('dark');
+              setView('admin');
+            } else {
+              const syncedProfile = await syncUserAccountOnAuth(
+                fbUser,
+                'USER',
+                pending?.name,
+                pending?.mode,
+                attributionToApply
+              );
+              pendingAuthRef.current = null;
+              syncingUidRef.current = null;
+              persistPendingReferral(null);
+              if (!isMounted) return;
+              setActiveReferral(null);
+              latestUserRef.current = syncedProfile;
               setUser(syncedProfile);
 
               const cloudExpenses = await loadUserExpensesFromFirestore(fbUser.uid);
@@ -187,19 +374,28 @@ export default function App() {
               setExpenses(validExpenses);
 
               localStorage.setItem('talambongo_auth_active', 'true');
-              if (syncedProfile.onboardingCompleted === false) {
+              if (needsMandatoryOnboarding(syncedProfile)) {
                 setView('onboarding');
               } else {
                 setView('app');
               }
-            } else {
-              // Vérification continue lors du rafraîchissement du token : empêcher l'accès admin si rôle USER
-              setView((prev) =>
-                prev === 'admin' || prev === 'landing' || prev === 'auth' ? 'app' : prev
-              );
+            }
+          } else {
+            // Vérification continue lors du rafraîchissement du token : empêcher l'accès admin si rôle USER et empêcher de contourner l'onboarding
+            const resolved = await resolveUserRole(fbUser);
+            if (!isMounted) return;
+            setRoleResolution(resolved);
+            if (resolved.role !== 'ADMIN') {
+              const mustOnboard = needsMandatoryOnboarding(latestUserRef.current);
+              setView((prev) => {
+                if (mustOnboard) return 'onboarding';
+                if (prev === 'admin' || prev === 'landing' || prev === 'auth') return 'app';
+                return prev;
+              });
             }
           }
         } catch (err) {
+          syncingUidRef.current = null;
           console.error('Erreur vérification session Firebase:', err);
           // Si l'utilisateur Firebase est authentifié mais temporairement hors-ligne, garder sa session active
           if (fbUser && isMounted) {
@@ -237,6 +433,7 @@ export default function App() {
   }, [expenses]);
 
   useEffect(() => {
+    latestUserRef.current = user;
     localStorage.setItem('talambongo_user', JSON.stringify(user));
   }, [user]);
 
@@ -280,40 +477,74 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleAuthAttempt = (intent: {
+    name?: string;
+    mode: 'signup' | 'login';
+    referralAttribution?: ReferralAttributionPayload | null;
+  }) => {
+    pendingAuthRef.current = intent;
+  };
+
   // Auth Success -> stores user intent; actual redirection is strictly governed by verified Firebase role
   const handleAuthSuccess = (
     userInfo: { name: string; email: string },
-    mode: 'signup' | 'login'
+    mode: 'signup' | 'login',
+    referralAttribution?: ReferralAttributionPayload | null
   ) => {
-    pendingAuthRef.current = { name: userInfo.name, mode };
+    const resolvedAttribution =
+      referralAttribution !== undefined ? referralAttribution : activeReferralRef.current;
+    pendingAuthRef.current = {
+      name: userInfo.name,
+      mode,
+      referralAttribution: resolvedAttribution,
+    };
     if (auth.currentUser) {
+      const currentFbUser = auth.currentUser;
+      // Si onIdTokenChanged est déjà en train ou vient de synchroniser cet UID, éviter une double écriture concurrente
+      if (lastResolvedUidRef.current === currentFbUser.uid || syncingUidRef.current === currentFbUser.uid) {
+        if (mode === 'signup' && userInfo.name && latestUserRef.current.name !== userInfo.name) {
+          handleUpdateUser({ name: userInfo.name });
+        }
+        if (needsMandatoryOnboarding(latestUserRef.current)) {
+          setView('onboarding');
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+
       setAuthChecking(true);
-      resolveUserRole(auth.currentUser, true)
+      syncingUidRef.current = currentFbUser.uid;
+      resolveUserRole(currentFbUser, true)
         .then(async (resolved) => {
           setRoleResolution(resolved);
-          lastResolvedUidRef.current = auth.currentUser!.uid;
+          lastResolvedUidRef.current = currentFbUser.uid;
           if (resolved.role === 'ADMIN') {
-            await ensureAdminRegistryEntry(auth.currentUser!);
+            await ensureAdminRegistryEntry(currentFbUser);
             const synced = await syncUserAccountOnAuth(
-              auth.currentUser!,
+              currentFbUser,
               'ADMIN',
               userInfo.name,
               mode
             );
+            latestUserRef.current = synced;
             setUser(synced);
             setView('admin');
           } else {
             const synced = await syncUserAccountOnAuth(
-              auth.currentUser!,
+              currentFbUser,
               'USER',
               userInfo.name,
-              mode
+              mode,
+              resolvedAttribution
             );
+            persistPendingReferral(null);
+            setActiveReferral(null);
+            latestUserRef.current = synced;
             setUser(synced);
-            const cloudExpenses = await loadUserExpensesFromFirestore(auth.currentUser!.uid);
+            const cloudExpenses = await loadUserExpensesFromFirestore(currentFbUser.uid);
             const { validExpenses } = pruneExpiredExpenses(cloudExpenses);
             setExpenses(validExpenses);
-            setView(synced.onboardingCompleted === false ? 'onboarding' : 'app');
+            setView(needsMandatoryOnboarding(synced) ? 'onboarding' : 'app');
           }
           localStorage.setItem('talambongo_auth_active', 'true');
           window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -321,27 +552,35 @@ export default function App() {
         .catch((err) => console.error(err))
         .finally(() => {
           pendingAuthRef.current = null;
+          syncingUidRef.current = null;
           setAuthChecking(false);
         });
     }
   };
 
-  // Onboarding Complete -> proceed to Dashboard
+  // Onboarding Complete -> enregistre le pays + définit automatiquement la devise puis accède au Dashboard
   const handleOnboardingComplete = (data: {
     country: string;
+    currency?: SupportedCurrency;
     mainGoal: string;
     trackingFrequency: string;
   }) => {
+    const resolvedCurrency = data.currency || getCurrencyForCountry(data.country);
     const nextUpdates: Partial<UserProfile> = {
       country: data.country,
+      currency: resolvedCurrency,
       mainGoal: data.mainGoal,
       trackingFrequency: data.trackingFrequency,
       onboardingCompleted: true,
     };
-    setUser((prev) => ({
-      ...prev,
-      ...nextUpdates,
-    }));
+    setUser((prev) => {
+      const updated = {
+        ...prev,
+        ...nextUpdates,
+      };
+      latestUserRef.current = updated;
+      return updated;
+    });
     if (firebaseUser) {
       updateUserAccountDoc(firebaseUser.uid, nextUpdates).catch((err) =>
         console.error('Sync onboarding error:', err)
@@ -367,8 +606,13 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Add Expense
+  // Add Expense (verrouillé si l'essai gratuit ou l'abonnement a expiré)
   const handleAddExpense = (newExpData: Omit<Expense, 'id' | 'createdAt'>) => {
+    const accessState = getSubscriptionAccessState(latestUserRef.current);
+    if (!canAccessFeature(accessState, 'add_expense')) {
+      return;
+    }
+
     const newExpense: Expense = {
       ...newExpData,
       id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -383,8 +627,13 @@ export default function App() {
     }
   };
 
-  // Delete Expense
+  // Delete Expense (verrouillé si l'essai gratuit ou l'abonnement a expiré)
   const handleDeleteExpense = (id: string) => {
+    const accessState = getSubscriptionAccessState(latestUserRef.current);
+    if (!canAccessFeature(accessState, 'delete_expense')) {
+      return;
+    }
+
     setExpenses((prev) => {
       const next = prev.filter((e) => e.id !== id);
       if (firebaseUser) {
@@ -396,35 +645,75 @@ export default function App() {
     });
   };
 
-  // Update User Profile (+ record subscription payment in Firestore when upgrading to Premium)
+  // Update User Profile (uniquement champs profil ; jamais de promotion Premium côté client sans confirmation paiement)
   const handleUpdateUser = (updated: Partial<UserProfile>) => {
     setUser((prev) => {
-      const merged = { ...prev, ...updated };
-      if (firebaseUser) {
-        if (updated.status === 'Premium') {
-          const planType =
-            updated.subscriptionType === 'quarterly' ? 'quarterly' : 'monthly';
-          const activeCurrency = merged.currency || 'XOF';
-          const baseXof = planType === 'quarterly' ? 1200 : 500;
-          const amount =
-            activeCurrency === 'EUR'
-              ? Math.round(convertAmount(baseXof, 'XOF', 'EUR') * 100) / 100
-              : Math.round(convertAmount(baseXof, 'XOF', activeCurrency));
+      const safeUpdates: Partial<UserProfile> = { ...updated };
+      delete safeUpdates.status;
+      delete safeUpdates.subscriptionStatus;
+      delete safeUpdates.subscriptionType;
+      delete safeUpdates.subscriptionStartAtMs;
+      delete safeUpdates.subscriptionEndAtMs;
+      delete safeUpdates.trialStartedAtMs;
+      delete safeUpdates.trialEndsAtMs;
+      delete safeUpdates.hasUsedFreeTrial;
+      delete safeUpdates.trialDaysLeft;
 
-          recordSubscriptionInFirestore(firebaseUser.uid, {
-            country: merged.country || 'Congo-Brazzaville',
-            planType,
-            currency: activeCurrency,
-            amount,
-          }).catch((err) => console.error('Subscription sync error:', err));
-        } else {
-          updateUserAccountDoc(firebaseUser.uid, updated).catch((err) =>
-            console.error('Update user error:', err)
-          );
-        }
+      const merged = { ...prev, ...safeUpdates };
+      latestUserRef.current = merged;
+      if (firebaseUser && Object.keys(safeUpdates).length > 0) {
+        updateUserAccountDoc(firebaseUser.uid, safeUpdates).catch((err) =>
+          console.error('Update user error:', err)
+        );
       }
       return merged;
     });
+  };
+
+  // Souscription / Renouvellement Premium : activation STRICTEMENT après confirmation serveur/Firestore
+  const handleSubscribePlan = async (
+    planType: 'monthly' | 'quarterly',
+    idempotencyKey?: string
+  ): Promise<RecordedSubscriptionResult> => {
+    if (!firebaseUser) {
+      throw new Error('Connexion requise pour finaliser le paiement.');
+    }
+
+    const currentProfile = latestUserRef.current;
+    const activeCurrency = currentProfile.currency || 'XOF';
+    const baseXof = planType === 'quarterly' ? 1200 : 500;
+    const amount =
+      activeCurrency === 'EUR'
+        ? Math.round(convertAmount(baseXof, 'XOF', 'EUR') * 100) / 100
+        : Math.round(convertAmount(baseXof, 'XOF', activeCurrency));
+
+    const result = await recordSubscriptionInFirestore(firebaseUser.uid, {
+      country: currentProfile.country || 'Congo-Brazzaville',
+      planType,
+      currency: activeCurrency,
+      amount,
+      paymentStatus: 'confirmed',
+      idempotencyKey,
+    });
+
+    if (result.activated && result.paymentStatus === 'confirmed') {
+      setUser((prev) => {
+        const nextUser: UserProfile = {
+          ...prev,
+          status: 'Premium',
+          subscriptionStatus: result.status,
+          subscriptionType: planType,
+          subscriptionStartAtMs: result.startAtMs,
+          subscriptionEndAtMs: result.endAtMs,
+          lastConfirmedSubscriptionId: result.subscriptionId,
+          trialDaysLeft: 0,
+        };
+        latestUserRef.current = nextUser;
+        return nextUser;
+      });
+    }
+
+    return result;
   };
 
   const handleReportViewed = () => {
@@ -467,6 +756,8 @@ export default function App() {
       {view === 'auth' && (
         <AuthScreen
           initialMode={authInitialMode}
+          lockedReferral={activeReferral}
+          onAuthAttempt={handleAuthAttempt}
           onSuccess={handleAuthSuccess}
           onBack={() => setView('landing')}
         />
@@ -488,6 +779,7 @@ export default function App() {
           onAddExpense={handleAddExpense}
           onDeleteExpense={handleDeleteExpense}
           onUpdateUser={handleUpdateUser}
+          onSubscribePlan={handleSubscribePlan}
           onLogout={handleLogout}
           onReportViewed={handleReportViewed}
           onPdfExported={handlePdfExported}
